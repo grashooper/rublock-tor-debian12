@@ -1,707 +1,443 @@
-# rublock-tor-debian12
+```markdown
+# rublock-tor
 
-**Автоматический обход блокировок через Tor на Debian 12**
+**rublock-tor** — это набор скриптов для автоматического обхода блокировок через Tor на Debian/Ubuntu, с использованием:
 
-Система автоматически перенаправляет трафик к заблокированным ресурсам через Tor, используя актуальные списки блокировок из нескольких источников. Обычный трафик идёт напрямую, без замедления.
+- `tor` (TransPort + DNSPort)
+- `dnsmasq` (DNS с фильтрацией)
+- `ipset` + `iptables` (прозрачное перенаправление трафика)
+- агрегированных списков блокировок из нескольких источников
+- собственных дополнительных списков (`custom.list`)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Debian](https://img.shields.io/badge/Debian-12-red.svg)](https://www.debian.org/)
-[![Tor](https://img.shields.io/badge/Tor-anonymity-purple.svg)](https://www.torproject.org/)
+Проект рассчитан на работу как для самого сервера, так и для всей локальной сети (LAN).
 
-## 📋 Содержание
+---
 
-- [Возможности](#-возможности)
-- [Архитектура](#-архитектура)
-- [Требования](#-требования)
-- [Быстрая установка](#-быстрая-установка)
-- [Подробная установка](#-подробная-установка)
-- [Использование](#-использование)
-- [Настройка](#-настройка)
-- [Управление](#-управление)
-- [Источники списков блокировок](#-источники-списков-блокировок)
-- [Устранение неполадок](#-устранение-неполадок)
-- [FAQ](#-faq)
-- [Производительность](#-производительность)
-- [Безопасность](#-безопасность)
-- [Благодарности](#-благодарности)
-- [Лицензия](#-лицензия)
+## 📌 Возможности
 
-## 🚀 Возможности
+- ✅ Загрузка и объединение списков блокировок из **нескольких источников**:
+  - [antifilter.download](https://antifilter.download/) (рекомендуется)
+  - [zapret-info](https://github.com/zapret-info/z-i) (официальная дамп-таблица РКН)
+  - (опционально) [antizapret.info](https://antizapret.info/) — медленный API
+  - (опционально) [rublacklist.net](https://reestr.rublacklist.net/) — часто недоступен
+- ✅ **Автоматическое объединение и дедупликация**:
+  - удаление дубликатов доменов/IP
+  - группировка поддоменов по домену второго уровня
+- ✅ Поддержка **подсетей (CIDR)** в ipset:
+  - `192.168.0.0/24`, `10.0.0.0/8` и т.д.
+- ✅ **Кастомный список** `/etc/rublock/custom.list`:
+  - создаётся автоматически с примером в комментариях
+  - можно добавлять свои домены, IP и подсети
+- ✅ **Graceful degradation**:
+  - при недоступности источника — используется кэш или оставшиеся источники
+  - не ломает работу при временных сбоях сети
+- ✅ **Кэширование**:
+  - `/var/cache/rublock/` — кэш доменов и IP
+  - повторные обновления быстрее, возможно работать даже при временной потере сети
+- ✅ **Красивый и подробный вывод**:
+  - прогресс-бары
+  - статистика по источникам
+  - количество уникальных доменов и IP / подсетей
+- ✅ Автообновление через systemd timer (при наличии `rublock-update.timer` в репозитории)
 
-- ✅ **Автоматический обход**: ~1 млн заблокированных доменов и IP
-- ✅ **Прозрачность**: обычный трафик идёт напрямую (не тормозит)
-- ✅ **Автообновление**: списки обновляются ежедневно
-- ✅ **Несколько источников**: antifilter, antizapret, zapret-info, rublacklist
-- ✅ **Сетевой доступ**: работает для всех устройств в локальной сети
-- ✅ **IPv6 поддержка**: полная поддержка IPv4 и IPv6
-- ✅ **Низкие требования**: работает на слабом железе
-- ✅ **Умная фильтрация**: группировка поддоменов, исключение популярных сервисов
+---
 
-## 🏗 Архитектура
+## 🧱 Архитектура
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Входящий трафик                          │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-              ┌──────────────────────┐
-              │  dnsmasq (port 53)   │ ◄─── DNS запросы
-              │  • 958K+ доменов     │
-              └──────────┬───────────┘
-                         │
-         ┌───────────────┴───────────────┐
-         │                               │
-         ▼                               ▼
-   Заблокирован?                   Обычный домен
-         │                               │
-         │                               ▼
-         │                         Прямой доступ
-         │
-         ▼
-┌────────────────────┐
-│  ipset             │
-│  • rublack-dns     │ ◄─── Динамические IP из DNS
-│  • rublack-ip      │ ◄─── 969K+ статических IP
-└────────┬───────────┘
-         │
-         ▼
-┌────────────────────┐
-│  iptables (NAT)    │
-│  REDIRECT → 9040   │
-└────────┬───────────┘
-         │
-         ▼
-┌────────────────────┐
-│  Tor TransPort     │
-│  127.0.0.1:9040    │ ◄─── Прозрачный прокси
-│  192.168.x.x:9040  │
-└────────┬───────────┘
-         │
-         ▼
-┌────────────────────┐
-│  Tor Network       │
-│  Анонимный выход   │
-└────────────────────┘
+```text
+[ Клиент / Локальная сеть ]
+        │
+        ▼
+┌─────────────────────┐
+│ dnsmasq (порт 53)   │  ← /etc/rublock/runblock.dnsmasq
+│ + ipset (rublack-*) │  ← /etc/rublock/runblock.ipset
+└─────────┬───────────┘
+          │ match-set rublack-dns / rublack-ip
+          ▼
+┌─────────────────────┐
+│ iptables (nat)      │  → REDIRECT → 9040 (Tor TransPort)
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Tor                 │
+│  - TransPort 9040   │
+│  - DNSPort 9053     │
+│  - SOCKS 9050       │
+└─────────┬───────────┘
+          │
+          ▼
+      [ Tor Network ]
 ```
 
-### Компоненты
+---
 
-| Компонент | Роль | Порты |
-|-----------|------|-------|
-| **dnsmasq** | DNS-сервер с фильтрацией | 53 (TCP/UDP) |
-| **Tor** | Анонимная сеть | 9040 (TransPort), 9050 (SOCKS), 9053 (DNS) |
-| **ipset** | Хранилище IP-адресов | - |
-| **iptables** | Перенаправление трафика | - |
-| **Lua скрипт** | Обновление списков | - |
+## 📦 Файлы и расположение
 
-## 📦 Требования
+```text
+/usr/local/lib/rublock/
+  └── rublupdate.lua       # Lua-скрипт обновления списков (ядро)
 
-### Системные требования
+/usr/local/bin/
+  └── rublock-update.sh    # Bash-обёртка: вызывает Lua и применяет ipset + iptables
 
-- **ОС**: Debian 12 (Bookworm)
-- **RAM**: минимум 512 MB (рекомендуется 1 GB)
-- **Диск**: 200 MB свободного места
-- **CPU**: любой (даже Raspberry Pi)
-- **Сеть**: стабильное интернет-соединение
+/etc/rublock/
+  ├── runblock.dnsmasq     # Авто-генерируемый конфиг для dnsmasq
+  ├── runblock.ipset       # Авто-генерируемый конфиг для ipset (для ipset restore)
+  └── custom.list          # Ваш кастомный список (создаётся автоматически с шаблоном)
 
-### Необходимые пакеты
+/var/cache/rublock/
+  ├── antifilter_domains.cache
+  ├── antifilter_ips.cache
+  ├── antifilter_subnets.cache
+  ├── antifilter_resolved.cache
+  └── zapretinfo_archive.cache
 
-Устанавливаются автоматически:
+/etc/dnsmasq.d/
+  └── rublock.conf         # Должен указывать на /etc/rublock/runblock.dnsmasq и ipset
+
+/systemd/system/
+  ├── rublock-update.service  # (если используется в проекте)
+  └── rublock-update.timer    # Периодический запуск обновления
 ```
-tor tor-geoipdb obfs4proxy dnsmasq ipset iptables-persistent 
-ca-certificates curl lua5.4 lua-socket lua-sec
-```
 
-## ⚡ Быстрая установка
+---
+
+## 🔧 Установка (вручную)
+
+### 1. Зависимости
 
 ```bash
-# 1. Клонировать репозиторий
-git clone https://github.com/grashooper/rublock-tor-debian12.git
-cd rublock-tor-debian12/debian
-
-# 2. Запустить установку (от root)
-sudo ./install_debian12.sh
-
-# 3. Следовать инструкциям установщика
+sudo apt update
+sudo apt install -y \
+  tor tor-geoipdb obfs4proxy \
+  dnsmasq ipset iptables-persistent \
+  lua5.4 lua-socket lua-sec \
+  ca-certificates curl
 ```
 
-Установка занимает 3-5 минут.
-
-## 📖 Подробная установка
-
-### Шаг 1: Подготовка системы
+### 2. Установка скриптов
 
 ```bash
-# Обновить систему
-sudo apt update && sudo apt upgrade -y
+# Каталог для lua-скрипта
+sudo mkdir -p /usr/local/lib/rublock
+sudo nano /usr/local/lib/rublock/rublupdate.lua
+# → Вставьте код rublupdate.lua из репозитория
+sudo chmod +x /usr/local/lib/rublock/rublupdate.lua
 
-# Клонировать репозиторий
-git clone https://github.com/grashooper/rublock-tor-debian12.git
-cd rublock-tor-debian12/debian
+# Каталог для данных
+sudo mkdir -p /etc/rublock
+
+# Bash-обёртка
+sudo nano /usr/local/bin/rublock-update.sh
+# → Вставьте код rublock-update.sh из репозитория
+sudo chmod +x /usr/local/bin/rublock-update.sh
+
+# Кэш
+sudo mkdir -p /var/cache/rublock
 ```
 
-### Шаг 2: Запуск установщика
+### 3. Настройка Tor и dnsmasq
+
+Упрощённо:
 
 ```bash
-sudo ./install_debian12.sh
+# dnsmasq
+sudo nano /etc/dnsmasq.d/rublock.conf
 ```
 
-Скрипт автоматически:
-1. **Определит** локальный IP-адрес
-2. **Установит** все необходимые пакеты
-3. **Настроит** Tor, dnsmasq, iptables
-4. **Скачает** актуальные списки блокировок
-5. **Создаст** systemd таймер для автообновления
+```ini
+# Использовать сгенерированный список
+conf-file=/etc/rublock/runblock.dnsmasq
 
-### Шаг 3: Проверка установки
+# ipset с именем rublack-dns
+# сам список будет в /etc/rublock/runblock.dnsmasq
+```
+
+Tor (пример):
 
 ```bash
-# Проверить статус сервисов
-systemctl status tor dnsmasq rublock-update.timer
+sudo nano /etc/tor/torrc
+```
 
-# Проверить количество записей
-echo "Доменов: $(wc -l < /etc/rublock/runblock.dnsmasq)"
-echo "IP-адресов: $(ipset list rublack-ip | grep -c '^[0-9]')"
+```conf
+User debian-tor
+DataDirectory /var/lib/tor
 
-# Проверить работу Tor
+SocksPort 127.0.0.1:9050
+TransPort 127.0.0.1:9040
+DNSPort 127.0.0.1:9053
+
+VirtualAddrNetworkIPv4 10.254.0.0/16
+AutomapHostsOnResolve 1
+
+ExitPolicy reject *:*
+ExitPolicy reject6 *:*
+ExitRelay 0
+
+ExcludeExitNodes {RU},{BY},{KG},{KZ},{UZ},{TJ},{TM},{TR},{AZ},{AM}
+StrictNodes 1
+```
+
+---
+
+## 🚀 Первый запуск
+
+```bash
+# Обновить списки и применить ipset + iptables
+sudo /usr/local/bin/rublock-update.sh
+```
+
+Пример вывода:
+
+```text
+┌──────────────────────────────────────────────────────────────────────┐
+│ rublock-tor Multi-Source Updater v3.3                               │
+└──────────────────────────────────────────────────────────────────────┘
+[📦] Source: all
+[🔧] Mode: Graceful degradation
+[⏰] Started at 15:34:08
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Fetching from Antifilter                                            │
+└──────────────────────────────────────────────────────────────────────┘
+[🌐] Downloading domains...
+[✓] Domains: 1,138,955
+...
+┌──────────────────────────────────────────────────────────────────────┐
+│ Fetching from Zapret-Info                                           │
+└──────────────────────────────────────────────────────────────────────┘
+[🌐] Downloading archive (dump.csv.gz)...
+[✓] Downloaded 161.81 MB
+[🔍] Processing CSV...
+Processing [████████████████████████████████████████] 100% (1,203,341/1,203,341)
+[✓] Domains: 1,202,380, IPs: 1,203,193
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Statistics                                                           │
+└──────────────────────────────────────────────────────────────────────┘
+  Unique domains:      1,131,139
+  Unique IPs/subnets:    188,456
+  Domains by source:
+    • antifilter:       1,119,341
+    • zapret-info:        485,578
+
+...
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ Applying iptables and ipset Rules                                   │
+└──────────────────────────────────────────────────────────────────────┘
+[✓] ipset loaded successfully
+[✓] Loaded 976,214 IP addresses/subnets into ipset
+[✓] Applied 4 iptables rules
+[✓] All services reloaded
+```
+
+---
+
+## 🎯 Выбор источников
+
+По умолчанию `rublock-update.sh` просто вызывает:
+
+```bash
+lua5.4 /usr/local/lib/rublock/rublupdate.lua
+```
+
+что эквивалентно:
+
+```bash
+lua5.4 /usr/local/lib/rublock/rublupdate.lua all
+```
+
+### Доступные источники:
+
+```bash
+# Все источники (по умолчанию: antifilter + zapret-info)
+sudo lua5.4 /usr/local/lib/rublock/rublupdate.lua all
+
+# Только antifilter
+sudo lua5.4 /usr/local/lib/rublock/rublupdate.lua antifilter
+
+# Только zapret-info
+sudo lua5.4 /usr/local/lib/rublock/rublupdate.lua zapret-info
+
+# Только antizapret (медленно!)
+sudo lua5.4 /usr/local/lib/rublock/rublupdate.lua antizapret
+
+# Только ruBlacklist
+sudo lua5.4 /usr/local/lib/rublock/rublupdate.lua rublacklist
+
+# Только ваш кастомный список (без внешних источников)
+sudo lua5.4 /usr/local/lib/rublock/rublupdate.lua custom
+```
+
+---
+
+## 🧾 Кастомный список `/etc/rublock/custom.list`
+
+### Автоматическое создание
+
+При первом запуске `rublupdate.lua`:
+
+- если `/etc/rublock/custom.list` **не существует** → создаётся шаблон с подробными комментариями и примерами
+- если существует → парсится и все валидные домены/IP/подсети добавляются в общую базу
+
+### Формат файла
+
+```text
+# Комментарии начинаются с #
+# Пустые строки игнорируются
+
+# Домены:
+example.com
+badsite.net
+subdomain.domain.org
+
+# IP:
+1.2.3.4
+5.6.7.8
+
+# Подсети:
+192.168.0.0/24
+10.0.0.0/8
+```
+
+### Пример
+
+```bash
+sudo nano /etc/rublock/custom.list
+```
+
+Добавьте:
+
+```text
+# Мои блокировки
+rutube.ru
+vk.com
+
+# IP
+1.1.1.1
+8.8.8.8
+
+# Подсеть
+203.0.113.0/24
+```
+
+И затем:
+
+```bash
+sudo /usr/local/bin/rublock-update.sh
+```
+
+---
+
+## 💾 Кэш (`/var/cache/rublock`)
+
+Скрипт автоматически кэширует результаты:
+
+- Если источник недоступен → лезет в кэш
+- Если кэша нет → этот источник считается упавшим, но остальные могут продолжить работу (режим `degrade`)
+
+Примеры кэшей:
+
+```text
+/var/cache/rublock/
+  antifilter_domains.cache
+  antifilter_ips.cache
+  antifilter_subnets.cache
+  antifilter_resolved.cache
+  zapretinfo_archive.cache
+```
+
+---
+
+## ⏰ Автообновление через systemd
+
+Если в репозитории есть `rublock-update.service` и `rublock-update.timer`, можно включить автообновление:
+
+```bash
+sudo cp systemd/rublock-update.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rublock-update.timer
+```
+
+Проверка:
+
+```bash
+systemctl list-timers | grep rublock-update
+```
+
+---
+
+## 🔍 Отладка
+
+```bash
+# Включить подробный вывод ipset при загрузке
+DEBUG=1 sudo /usr/local/bin/rublock-update.sh
+
+# Проверить содержимое ipset
+sudo ipset list rublack-ip | head -50
+
+# Проверить iptables
+sudo iptables -t nat -L PREROUTING -n -v | grep rublack
+
+# Проверить Tor
 curl --socks5 127.0.0.1:9050 https://check.torproject.org/api/ip
 ```
 
-Ожидаемый результат:
-```json
-{"IsTor":true,"IP":"xxx.xxx.xxx.xxx"}
-```
-
-## 🎯 Использование
-
-### На сервере (локально)
-
-После установки все заблокированные сайты работают автоматически:
-
-```bash
-# Проверить заблокированный сайт
-curl -I https://rutube.ru
-
-# Проверить обычный сайт (идёт напрямую)
-curl -I https://google.com
-```
-
-### На других устройствах в сети
-
-#### Вариант А: Автоматически через DNS
-
-На клиентском устройстве укажите DNS-сервер:
-
-**Linux/macOS:**
-```bash
-# Временно
-sudo echo "nameserver 192.168.2.11" > /etc/resolv.conf
-
-# Постоянно (NetworkManager)
-nmcli con mod "Ваше подключение" ipv4.dns "192.168.2.11"
-nmcli con up "Ваше подключение"
-```
-
-**Windows:**
-```
-Панель управления → Сеть → Свойства адаптера → IPv4 → DNS: 192.168.2.11
-```
-
-**Android/iOS:**
-```
-Настройки Wi-Fi → Дополнительно → DNS: 192.168.2.11
-```
-
-#### Вариант Б: Через SOCKS5 прокси
-
-**Firefox:**
-```
-Настройки → Сеть → Параметры подключения
-SOCKS v5: 192.168.2.11:9050
-```
-
-**Curl:**
-```bash
-curl --socks5 192.168.2.11:9050 https://заблокированный-сайт.com
-```
-
-**Telegram:**
-```
-Настройки → Данные и память → Прокси-сервер
-SOCKS5: 192.168.2.11:9050
-```
-
-### Доступные сервисы
-
-| Сервис | Адрес | Описание |
-|--------|-------|----------|
-| **DNS** | `127.0.0.1:53`<br>`192.168.2.11:53` | DNS с автоматической фильтрацией |
-| **SOCKS5** | `127.0.0.1:9050`<br>`192.168.2.11:9050` | Прокси для любых приложений |
-| **TransPort** | `127.0.0.1:9040`<br>`192.168.2.11:9040` | Прозрачный прокси (используется автоматически) |
-| **Tor DNS** | `127.0.0.1:9053`<br>`192.168.2.11:9053` | DNS напрямую через Tor |
-
-## ⚙️ Настройка
-
-### Изменение источника списков
-
-Отредактируйте `/usr/local/lib/rublock/rublupdate.lua`:
-
-```lua
-local config = {
-    blSource = "antifilter", -- Варианты: antifilter, antizapret, zapret-info, rublacklist
-    -- ...
-}
-```
-
-Доступные источники:
-
-| Источник | Описание | Размер списка |
-|----------|----------|---------------|
-| `antifilter` | Списки antifilter.download | ~900K записей |
-| `antizapret` | API antizapret.info | ~800K записей |
-| `zapret-info` | GitHub zapret-info | ~1M записей |
-| `rublacklist` | Реестр rublacklist.net | ~500K записей (часто недоступен) |
-
-### Настройка Tor
-
-Конфигурация в `/etc/tor/torrc`:
-
-```conf
-# Исключить определённые страны из выходных узлов
-ExcludeExitNodes {RU},{BY},{KG},{KZ},{UZ},{TJ},{TM},{TR},{AZ},{AM},{UA}
-
-# Использовать только определённые страны
-# ExitNodes {PL},{DE},{NL}
-# StrictNodes 1
-
-# Мосты obfs4 (если Tor заблокирован)
-# ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy
-# UseBridges 1
-# Bridge obfs4 IP:PORT FINGERPRINT cert=CERT iat-mode=0
-```
-
-**Получить мосты:** https://bridges.torproject.org/
-
-### Настройка dnsmasq
-
-Конфигурация в `/etc/dnsmasq.d/rublock.conf`:
-
-```conf
-# Изменить upstream DNS серверы
-server=8.8.8.8
-server=1.1.1.1
-
-# Добавить локальные домены
-address=/local.domain/192.168.1.100
-
-# Кэширование
-cache-size=10000
-```
-
-### Изменение времени обновления
-
-Отредактируйте `/etc/systemd/system/rublock-update.timer`:
-
-```ini
-[Timer]
-# Обновлять каждые 12 часов
-OnCalendar=*-*-* 00,12:00:00
-
-# Или раз в неделю по воскресеньям
-# OnCalendar=Sun *-*-* 05:00:00
-```
-
-Применить изменения:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart rublock-update.timer
-```
-
-### Добавление собственных доменов
-
-```bash
-# Добавить домен в список блокировок
-echo "my-blocked-domain.com" >> /etc/rublock/custom-domains.txt
-
-# Обновить конфигурацию
-sudo /usr/local/bin/rublock-update.sh
-```
-
-## 🔧 Управление
-
-### Основные команды
-
-```bash
-# Проверить статус
-sudo systemctl status tor dnsmasq rublock-update.timer
-
-# Перезапустить сервисы
-sudo systemctl restart tor dnsmasq
-
-# Обновить списки вручную
-sudo /usr/local/bin/rublock-update.sh
-
-# Проверить логи
-sudo journalctl -u rublock-update.service -f
-
-# Посмотреть расписание обновлений
-systemctl list-timers rublock-update.timer
-```
-
-### Временное отключение
-
-```bash
-# Остановить фильтрацию
-sudo systemctl stop tor dnsmasq
-
-# Возобновить
-sudo systemctl start tor dnsmasq
-```
-
-### Полное удаление
-
-```bash
-cd ~/rublock-tor-debian12/debian
-sudo ./uninstall.sh  # Если есть скрипт удаления
-
-# Или вручную:
-sudo systemctl stop tor dnsmasq rublock-update.timer
-sudo systemctl disable tor dnsmasq rublock-update.timer
-sudo apt remove --purge tor tor-geoipdb dnsmasq
-sudo rm -rf /etc/rublock /usr/local/lib/rublock /usr/local/bin/rublock-update.sh
-sudo rm -f /etc/systemd/system/rublock-update.*
-sudo ipset destroy rublack-ip rublack-dns 2>/dev/null
-sudo iptables -t nat -F  # Осторожно! Удалит все NAT правила
-```
-
-## 📊 Источники списков блокировок
-
-### Antifilter (по умолчанию)
-
-- **URL**: https://antifilter.download/
-- **Обновление**: несколько раз в день
-- **Формат**: текстовые списки (домены, IP, подсети)
-- **Размер**: ~900K записей
-- **Надёжность**: ⭐⭐⭐⭐⭐
-
-### Antizapret
-
-- **URL**: https://antizapret.info/
-- **API**: https://api.antizapret.info/
-- **Обновление**: ежедневно
-- **Размер**: ~800K записей
-- **Надёжность**: ⭐⭐⭐⭐
-
-### Zapret-Info
-
-- **URL**: https://github.com/zapret-info/z-i
-- **Источник**: официальный реестр РКН
-- **Обновление**: ежедневно
-- **Размер**: ~1M записей
-- **Надёжность**: ⭐⭐⭐⭐⭐
-
-### RuBlacklist
-
-- **URL**: https://reestr.rublacklist.net/
-- **Статус**: часто недоступен ⚠️
-- **Размер**: ~500K записей
-- **Надёжность**: ⭐⭐
-
-## 🐛 Устранение неполадок
-
-### Tor не подключается
-
-```bash
-# Проверить логи Tor
-sudo journalctl -u tor -n 50
-
-# Проверить что порт 9050 слушается
-sudo ss -tulnp | grep 9050
-
-# Перезапустить Tor
-sudo systemctl restart tor
-
-# Если Tor заблокирован — использовать мосты (см. раздел Настройка)
-```
-
-### DNS не резолвится
-
-```bash
-# Проверить что dnsmasq работает
-sudo systemctl status dnsmasq
-
-# Проверить что порт 53 открыт
-sudo ss -tulnp | grep :53
-
-# Проверить конфигурацию
-sudo dnsmasq --test
-
-# Проверить файл списков
-ls -lh /etc/rublock/runblock.dnsmasq
-```
-
-### ipset пустой
-
-```bash
-# Проверить наличие IP
-ipset list rublack-ip | head -20
-
-# Если пустой — обновить списки
-sudo /usr/local/bin/rublock-update.sh
-
-# Проверить файл ipset
-ls -lh /etc/rublock/runblock.ipset
-head -20 /etc/rublock/runblock.ipset
-```
-
-### iptables правила не применяются
-
-```bash
-# Проверить правила
-sudo iptables -t nat -L PREROUTING -n -v | grep rublack
-
-# Переустановить правила
-sudo /usr/local/bin/rublock-update.sh
-
-# Сохранить правила
-sudo netfilter-persistent save
-```
-
-### Обновление списков завершается с ошибкой
-
-```bash
-# Проверить логи
-sudo journalctl -u rublock-update.service -n 100
-
-# Проверить доступность источников
-curl -I https://antifilter.download/list/domains.lst
-
-# Попробовать другой источник
-sudo nano /usr/local/lib/rublock/rublupdate.lua
-# Изменить blSource = "antizapret"
-```
-
-### Медленная работа
-
-```bash
-# Проверить что обычный трафик не идёт через Tor
-curl -I https://google.com  # Должно быть быстро
-
-# Проверить только заблокированные
-curl -I https://rutube.ru   # Может быть медленнее
-
-# Уменьшить размер ipset (отключить группировку)
-sudo nano /usr/local/lib/rublock/rublupdate.lua
-# groupBySld = 0
-```
+---
 
 ## ❓ FAQ
 
-### Влияет ли это на скорость интернета?
+### Что если один из источников упал?
 
-**Нет**, только трафик к заблокированным ресурсам идёт через Tor. Обычные сайты (Google, YouTube и т.д.) работают с обычной скоростью.
+В режиме `failureMode = "degrade"`:
 
-### Можно ли использовать на Raspberry Pi?
+- Источник помечается как failed
+- Используются оставшиеся источники
+- Если доступен кэш — используется кэш
 
-**Да**, система работает даже на Raspberry Pi Zero. Рекомендуется минимум 512 MB RAM.
+### Как отключить antizapret или rublacklist?
 
-### Безопасно ли это?
+Внутри `rublupdate.lua` в разделе:
 
-**Да**, если:
-- ✅ Используете HTTPS (всегда)
-- ✅ Не передаёте критичные данные через Tor
-- ✅ Регулярно обновляете систему
+```lua
+if selected_source == "all" then
+    local sources_to_try = {
+        {name = "antifilter",  func = fetch_antifilter},
+        {name = "zapret-info", func = fetch_zapretinfo},
+        -- {name = "antizapret",  func = fetch_antizapret},
+        -- {name = "rublacklist", func = fetch_rublacklist},
+    }
+    ...
+end
+```
 
-Tor обеспечивает анонимность, но выходные узлы могут видеть незашифрованный трафик.
+Просто закомментируйте/раскомментируйте нужные строки.
 
-### Можно ли использовать с VPN?
+### Как часто обновлять?
 
-**Да**, можно использовать совместно с VPN:
-- VPN → Tor → Интернет (через rublock)
-- Tor → VPN → Интернет (настроить выход Tor через VPN)
+Рекомендуется 1 раз в сутки (например, в 05:00 по cron или systemd timer).
 
-### Что если мой IP изменится?
+---
 
-Скрипт установки автоматически определяет IP при установке. Если IP изменился:
+## 🧪 Тестирование
 
 ```bash
-cd ~/rublock-tor-debian12/debian
-sudo ./install_debian12.sh  # Переустановить (безопасно)
-```
+# Проверить, что блок-лист применён
+dig rutube.ru
+curl http://rutube.ru
 
-### Как добавить свой список доменов?
-
-Создайте файл `/etc/rublock/custom-domains.txt`:
-```
-domain1.com
-domain2.org
-*.wildcard-domain.net
-```
-
-Добавьте в `/usr/local/bin/rublock-update.sh`:
-```bash
-# После генерации списков
-if [[ -f /etc/rublock/custom-domains.txt ]]; then
-    cat /etc/rublock/custom-domains.txt >> /etc/rublock/runblock.dnsmasq
-fi
-```
-
-### Логируется ли трафик?
-
-**Нет**, по умолчанию:
-- dnsmasq не логирует запросы
-- Tor не логирует трафик
-- iptables не логирует пакеты
-
-Для включения логирования (отладка):
-```bash
-# dnsmasq
-echo "log-queries" >> /etc/dnsmasq.d/rublock.conf
-
-# Tor
-echo "Log notice file /var/log/tor/notices.log" >> /etc/tor/torrc
-```
-
-## 📈 Производительность
-
-### Потребление ресурсов
-
-| Сервис | RAM | CPU | Диск |
-|--------|-----|-----|------|
-| dnsmasq | 120 MB | <1% | 50 MB |
-| Tor | 80 MB | 2-5% | 100 MB |
-| ipset | 50 MB | 0% | - |
-| **Итого** | ~250 MB | <5% | ~200 MB |
-
-### Скорость работы
-
-- **DNS резолвинг**: <10 мс (локально)
-- **Tor соединение**: 500-3000 мс (первое подключение)
-- **Передача данных**: 1-10 Mbps (зависит от Tor сети)
-- **Обычный трафик**: без задержек ⚡
-
-### Бенчмарки
-
-```bash
-# DNS производительность
-time dig @127.0.0.1 google.com  # ~5-10 мс
-
-# Tor производительность
-time curl --socks5 127.0.0.1:9050 https://check.torproject.org  # ~1-3 сек
-
-# Обычный трафик (без Tor)
-time curl https://google.com  # ~50-100 мс
-```
-
-## 🔒 Безопасность
-
-### Рекомендации
-
-✅ **Делайте:**
-- Используйте HTTPS всегда
-- Регулярно обновляйте систему: `apt update && apt upgrade`
-- Используйте сильные пароли
-- Ограничьте доступ к серверу (firewall)
-- Проверяйте логи: `journalctl -u tor -f`
-
-❌ **Не делайте:**
-- Не используйте для банковских операций через Tor
-- Не передавайте пароли по HTTP
-- Не открывайте порты наружу без firewall
-- Не используйте слабые пароли
-
-### Защита сервера
-
-```bash
-# Установить firewall
-sudo apt install ufw
-
-# Разрешить SSH
-sudo ufw allow 22/tcp
-
-# Разрешить DNS для локальной сети
-sudo ufw allow from 192.168.0.0/16 to any port 53
-
-# Включить firewall
-sudo ufw enable
-
-# Проверить статус
-sudo ufw status
-```
-
-### Обновления безопасности
-
-```bash
-# Автоматические обновления безопасности
-sudo apt install unattended-upgrades
-sudo dpkg-reconfigure -plow unattended-upgrades
-```
-
-### Аудит
-
-```bash
-# Проверить открытые порты
-sudo ss -tulnp
-
-# Проверить iptables правила
-sudo iptables -L -n -v
-
-# Проверить процессы
-sudo ps aux | grep -E "tor|dnsmasq"
-
-# Проверить подключения Tor
-sudo ss -tnp | grep tor
-```
-
-## 🙏 Благодарности
-
-Проект использует данные и идеи из:
-
-- [**antifilter.download**](https://antifilter.download/) — актуальные списки блокировок
-- [**antizapret.info**](https://antizapret.info/) — API списков и методология
-- [**zapret-info**](https://github.com/zapret-info/z-i) — официальный реестр РКН
-- [**Tor Project**](https://www.torproject.org/) — сеть анонимизации
-- [**dnsmasq**](https://thekelleys.org.uk/dnsmasq/doc.html) — лёгкий DNS/DHCP сервер
-
-Спасибо всем контрибьюторам и сообществу за поддержку свободного интернета! 💜
-
-## 📄 Лицензия
-
-MIT License
-
-```
-Copyright (c) 2025 rublock-tor-debian12
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+# Проверить, что обычные сайты не идут через Tor (если так настроено)
+curl -I https://google.com
 ```
 
 ---
 
-## 🌟 Поддержка проекта
+## 📝 Лицензия
 
-Если проект вам помог, поставьте ⭐ на GitHub!
-
-Нашли баг? [Создайте issue](https://github.com/grashooper/rublock-tor-debian12/issues)
-
-Есть идеи? [Pull requests приветствуются!](https://github.com/grashooper/rublock-tor-debian12/pulls)
+MIT License — см. файл `LICENSE` в репозитории.
 
 ---
 
-**Сделано с ❤️ для свободного интернета**
+Если вы хотите улучшить логику, добавить свои источники или оптимизации — pull requests приветствуются.
