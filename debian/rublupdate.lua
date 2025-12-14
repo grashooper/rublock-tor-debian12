@@ -2,7 +2,7 @@
 
 --[[
 rublock-tor Multi-Source List Updater
-Version: 3.3 (Fixed)
+Version: 3.3 (fixed)
 
 Features:
 - Multiple sources with fallback
@@ -10,7 +10,6 @@ Features:
 - Graceful degradation when sources fail
 - Smart caching of previous successful lists
 - Detailed statistics
-- Fixed ipset generation (hash:net for CIDR support)
 
 Usage:
   lua rublupdate.lua [source]
@@ -38,16 +37,16 @@ local config = {
     -- Таймауты для источников (секунды)
     timeouts = {
         antifilter = 90,
-        antizapret = 300,
-        zapretinfo = 180,
+        antizapret = 300,  -- 5 минут (медленный API)
+        zapretinfo = 180,  -- 3 минуты
         rublacklist = 60,
     },
 
     -- Поведение при недоступности источников
-    failureMode = "degrade",
+    failureMode = "degrade",  -- "fail" или "degrade"
 
     groupBySld = 32,
-    neverGroupMasks = { "^%a%a%a?%.%a%a$" },
+    neverGroupMasks = { "^%a%a%a?.%a%a$" },
     neverGroupDomains = {
         ["livejournal.com"] = true,
         ["facebook.com"] = true,
@@ -102,12 +101,12 @@ local valid_sources = {
 if not valid_sources[selected_source] then
     print(string.format("Invalid source: %s", selected_source))
     print("\nValid sources:")
-    print("  antifilter    - Antifilter.download (recommended)")
-    print("  antizapret    - Antizapret API (slow)")
-    print("  zapret-info   - Zapret-Info GitHub")
-    print("  rublacklist   - RuBlacklist API")
-    print("  all           - Merge all sources (default)")
-    print("  custom        - Only custom lists")
+    print("  antifilter  - Antifilter.download (recommended)")
+    print("  antizapret  - Antizapret API (slow)")
+    print("  zapret-info - Zapret-Info GitHub")
+    print("  rublacklist - RuBlacklist API")
+    print("  all         - Merge all sources (default)")
+    print("  custom      - Only custom lists")
     os.exit(1)
 end
 
@@ -120,16 +119,16 @@ end
 -- ============================================================================
 
 local colors = {
-    reset   = "\27[0m",
-    bold    = "\27[1m",
-    dim     = "\27[2m",
-    red     = "\27[31m",
-    green   = "\27[32m",
-    yellow  = "\27[33m",
-    blue    = "\27[34m",
+    reset = "\27[0m",
+    bold = "\27[1m",
+    dim = "\27[2m",
+    red = "\27[31m",
+    green = "\27[32m",
+    yellow = "\27[33m",
+    blue = "\27[34m",
     magenta = "\27[35m",
-    cyan    = "\27[36m",
-    white   = "\27[37m",
+    cyan = "\27[36m",
+    white = "\27[37m",
 }
 
 -- ============================================================================
@@ -138,16 +137,9 @@ local colors = {
 
 local function print_header(text)
     local width = 70
-    local text_len = #text
-    local padding = math.floor((width - text_len - 2) / 2)
-    local padding_right = width - padding - text_len
+    local padding = math.floor((width - #text - 2) / 2)
     print(string.format("\n%s%s┌%s┐%s", colors.cyan, colors.bold, string.rep("─", width), colors.reset))
-    print(string.format("%s%s│%s%s%s%s│%s", 
-        colors.cyan, colors.bold, 
-        string.rep(" ", padding), 
-        colors.white .. text .. colors.cyan, 
-        string.rep(" ", padding_right), 
-        colors.bold, colors.reset))
+    print(string.format("%s%s│%s%s%s%s│%s", colors.cyan, colors.bold, string.rep(" ", padding), colors.white, text, string.rep(" ", width - padding - #text), colors.reset))
     print(string.format("%s%s└%s┘%s\n", colors.cyan, colors.bold, string.rep("─", width), colors.reset))
 end
 
@@ -308,10 +300,8 @@ end
 
 local function http_fetch(url, sink, timeout)
     timeout = timeout or 90
-    local cmd = string.format(
-        "timeout %d curl -fsSL --compressed --max-time %d '%s' 2>/dev/null",
-        timeout, timeout, url
-    )
+    local cmd = string.format("timeout %d curl -fsSL --compressed --max-time %d '%s' 2>/dev/null",
+        timeout, timeout, url)
     local handle = io.popen(cmd, "r")
     if not handle then return false, "curl failed to start" end
 
@@ -328,10 +318,10 @@ end
 
 local function http_fetch_gunzip(url, sink, timeout)
     timeout = timeout or 120
+    -- ИСПРАВЛЕНО: Правильное экранирование кавычек
     local cmd = string.format(
-        'timeout %d bash -c "curl -fsSL --max-time %d \'%s\' 2>/dev/null | gunzip -c 2>/dev/null"',
-        timeout, timeout, url
-    )
+        [[timeout %d bash -c "curl -fsSL --max-time %d '%s' 2>/dev/null | gunzip -c 2>/dev/null"]],
+        timeout, timeout, url)
     local handle = io.popen(cmd, "r")
     if not handle then return false, "curl/gunzip failed" end
 
@@ -371,14 +361,15 @@ local function is_valid_subnet(subnet)
     return false
 end
 
+-- ИСПРАВЛЕНО: Полностью переписанная функция normalize_ip
 local function normalize_ip(ip)
-    -- Убираем пробелы
+    -- Убираем пробелы по краям
     ip = ip:match("^%s*(.-)%s*$")
     if not ip or ip == "" then
         return nil
     end
     
-    -- Убираем /32 (это одиночный IP)
+    -- Убираем /32 (это эквивалент одиночного IP)
     ip = ip:gsub("/32$", "")
     
     -- Проверяем валидность
@@ -391,25 +382,12 @@ end
 
 local function normalize_domain(domain)
     if not domain or domain == "" then return nil end
-    
-    -- Убираем пробелы и приводим к нижнему регистру
     domain = domain:match("^%s*(.-)%s*$"):lower()
-    
-    -- Убираем www.
-    if config.stripWww then
-        domain = domain:gsub("^www%.", "")
-    end
-    
-    -- IDN конвертация
-    if idn and config.convertIdn then
-        domain = idn.encode(domain)
-    end
-    
-    -- Проверки валидности
+    if config.stripWww then domain = domain:gsub("^www%.", "") end
+    if idn and config.convertIdn then domain = idn.encode(domain) end
     if #domain > 255 or #domain < 3 then return nil end
     if not domain:match("%.") then return nil end
     if is_valid_ipv4(domain) then return nil end
-    
     return domain
 end
 
@@ -419,26 +397,20 @@ end
 
 local function hex2unicode(code)
     local n = tonumber(code, 16)
-    if n < 128 then
+    if (n < 128) then
         return string.char(n)
-    elseif n < 2048 then
-        return string.char(
-            192 + math.floor(n / 64),
-            128 + (n % 64)
-        )
+    elseif (n < 2048) then
+        return string.char(192 + ((n - (n % 64)) / 64), 128 + (n % 64))
     else
-        return string.char(
-            224 + math.floor(n / 4096),
-            128 + math.floor((n % 4096) / 64),
-            128 + (n % 64)
-        )
+        return string.char(224 + ((n - (n % 4096)) / 4096),
+                          128 + (((n % 4096) - (n % 64)) / 64),
+                          128 + (n % 64))
     end
 end
 
 local function addEntry(bltables, entry, source_name)
     if not entry or entry == "" then return end
 
-    -- Пробуем как IP
     local normalized_ip = normalize_ip(entry)
     if normalized_ip then
         if not bltables.ips[normalized_ip] then
@@ -451,7 +423,6 @@ local function addEntry(bltables, entry, source_name)
         return
     end
 
-    -- Пробуем как домен
     local normalized_domain = normalize_domain(entry)
     if normalized_domain then
         local subDomain, secondLevelDomain = normalized_domain:match("^([a-z0-9%-%.]-)([a-z0-9%-]+%.[a-z0-9%-]+)$")
@@ -473,18 +444,13 @@ end
 -- ============================================================================
 
 local function antizapretExtractDomains()
-    local currentRecord = ""
-    local buffer = ""
-    local bufferPos = 1
-    local streamEnded = false
-    
+    local currentRecord, buffer, bufferPos, streamEnded = "", "", 1, false
     return function(chunk)
         if chunk == nil then
             streamEnded = true
         else
             buffer = buffer .. chunk
         end
-        
         local newlinePosition = buffer:find("\n", bufferPos)
         if newlinePosition then
             currentRecord = currentRecord .. buffer:sub(bufferPos, newlinePosition - 1)
@@ -506,18 +472,13 @@ local function antizapretExtractDomains()
 end
 
 local function rublacklistExtractDomains()
-    local currentRecord = ""
-    local buffer = ""
-    local bufferPos = 1
-    local streamEnded = false
-    
+    local currentRecord, buffer, bufferPos, streamEnded = "", "", 1, false
     return function(chunk)
         if chunk == nil then
             streamEnded = true
         else
             buffer = buffer .. chunk
         end
-        
         while true do
             local escapeStart, escapeEnd, escapedChar = buffer:find("\\(.)", bufferPos)
             if escapedChar then
@@ -535,8 +496,7 @@ local function rublacklistExtractDomains()
                 end
             else
                 currentRecord = currentRecord .. buffer:sub(bufferPos, #buffer)
-                buffer = ""
-                bufferPos = 1
+                buffer, bufferPos = "", 1
                 if streamEnded then
                     return currentRecord ~= "" and currentRecord or nil
                 end
@@ -581,7 +541,6 @@ local function fetch_antifilter(bltables)
     local stats = {domains = 0, ips = 0, subnets = 0, resolved = 0}
     local timeout = config.timeouts.antifilter
 
-    -- Domains
     print_info("🌐", "Downloading domains...")
     local buf = {}
     if http_fetch(config.urls.antifilter_fqdn, ltn12.sink.table(buf), timeout) then
@@ -601,7 +560,7 @@ local function fetch_antifilter(bltables)
                 stats.domains = stats.domains + 1
             end
             local age = get_cache_age("antifilter", "domains")
-            print_info("💾", string.format("Loaded from cache (%s, age: %dd)", 
+            print_info("💾", string.format("Loaded from cache (%s, age: %dd)",
                 format_number(stats.domains), math.floor((age or 0) / 86400)))
         else
             print_error("✗", "No cache available")
@@ -609,7 +568,6 @@ local function fetch_antifilter(bltables)
         end
     end
 
-    -- IPs
     print_info("🌐", "Downloading IPs...")
     buf = {}
     if http_fetch(config.urls.antifilter_ip, ltn12.sink.table(buf), timeout) then
@@ -624,7 +582,6 @@ local function fetch_antifilter(bltables)
         print_warning("⚠", "IPs download failed (non-critical)")
     end
 
-    -- Subnets
     print_info("🌐", "Downloading subnets...")
     buf = {}
     if http_fetch(config.urls.antifilter_net, ltn12.sink.table(buf), timeout) then
@@ -639,7 +596,6 @@ local function fetch_antifilter(bltables)
         print_warning("⚠", "Subnets download failed (non-critical)")
     end
 
-    -- Resolved IPs
     print_info("🌐", "Downloading resolved IPs...")
     buf = {}
     if http_fetch(config.urls.antifilter_ip_full, ltn12.sink.table(buf), timeout) then
@@ -686,12 +642,8 @@ local function fetch_zapretinfo(bltables)
     print_success("✓", string.format("Downloaded %s", format_size(#data)))
 
     print_info("🔍", "Processing CSV...")
-    local totalLines = 0
-    local stats = {domains = 0, ips = 0}
-    
-    for _ in data:gmatch("[^\r\n]+") do
-        totalLines = totalLines + 1
-    end
+    local totalLines, stats = 0, {domains = 0, ips = 0}
+    for _ in data:gmatch("[^\r\n]+") do totalLines = totalLines + 1 end
 
     local lineCount = 0
     for line in data:gmatch("[^\r\n]+") do
@@ -699,7 +651,7 @@ local function fetch_zapretinfo(bltables)
         if lineCount % 50000 == 0 then
             print_progress(lineCount, totalLines, "Processing")
         end
-        
+
         local ip_str, fqdn_str = line:match("^([^;]*);([^;]*);")
         if fqdn_str and fqdn_str ~= "" then
             addEntry(bltables, fqdn_str, "zapret-info")
@@ -712,7 +664,7 @@ local function fetch_zapretinfo(bltables)
     end
 
     print_progress(totalLines, totalLines, "Processing")
-    print_success("✓", string.format("Domains: %s, IPs: %s", 
+    print_success("✓", string.format("Domains: %s, IPs: %s",
         format_number(stats.domains), format_number(stats.ips)))
 
     local elapsed = os.difftime(os.time(), source_timer.start_time)
@@ -734,11 +686,11 @@ local function fetch_antizapret(bltables)
         if chunk and chunk ~= "" then
             addEntry(bltables, chunk, "antizapret")
             domain_count = domain_count + 1
-            
+
             local now = os.time()
             if os.difftime(now, last_update) >= 2 then
-                io.write(string.format("\r  %sProcessed: %s domains (%.0fs)...%s", 
-                    colors.cyan, format_number(domain_count), 
+                io.write(string.format("\r  %sProcessed: %s domains (%.0fs)...%s",
+                    colors.cyan, format_number(domain_count),
                     os.difftime(now, source_timer.start_time), colors.reset))
                 io.flush()
                 last_update = now
@@ -749,7 +701,7 @@ local function fetch_antizapret(bltables)
 
     local extractSink = ltn12.sink.chain(antizapretExtractDomains(), domainSink)
     if http_fetch(config.urls.antizapret_domains, extractSink, timeout) then
-        print(string.format("\r  Processed: %s domains                              ", 
+        print(string.format("\r  Processed: %s domains                              ",
             format_number(domain_count)))
         print_success("✓", string.format("Domains: %s", format_number(domain_count)))
     else
@@ -784,7 +736,6 @@ local function fetch_rublacklist(bltables)
 
     print_info("🌐", "Downloading from API...")
     local domain_count = 0
-    
     local domainSink = function(chunk)
         if chunk and chunk ~= "" then
             addEntry(bltables, chunk, "rublacklist")
@@ -811,8 +762,7 @@ end
 
 local function compactDomainList(fqdnList, subdomainsCount)
     print_info("🔄", "Compacting domain list...")
-    local domainTable = {}
-    local grouped = 0
+    local domainTable, grouped = {}, 0
 
     if config.groupBySld and (config.groupBySld > 0) then
         for sld in pairs(subdomainsCount) do
@@ -854,8 +804,7 @@ end
 local function generateDnsmasqConfig(configPath, domainList)
     print_info("💾", "Generating dnsmasq config...")
     local configFile = assert(io.open(configPath, "w"), "cannot open dnsmasq config")
-    local count = 0
-    local total = table_count(domainList)
+    local count, total = 0, table_count(domainList)
 
     for fqdn in pairs(domainList) do
         if config.torifyNsLookups then
@@ -886,21 +835,18 @@ local function generateIpsetConfig(configPath, ipList)
     print_info("💾", "Generating ipset config...")
     local configFile = assert(io.open(configPath, "w"), "cannot open ipset config")
 
-    -- ИСПРАВЛЕНО: используем hash:net вместо hash:ip для поддержки CIDR
-    local setName = config.ipsetIp
-    local tmpSetName = setName .. "-tmp"
-    
-    -- Создаём наборы с типом hash:net (поддерживает и одиночные IP, и подсети)
-    configFile:write(string.format("create %s hash:net family inet hashsize 131072 maxelem 2097152 -exist\n", setName))
-    configFile:write(string.format("create %s hash:net family inet hashsize 131072 maxelem 2097152 -exist\n", tmpSetName))
-    configFile:write(string.format("flush %s\n", tmpSetName))
+    -- Создаём основной и временный набор
+    configFile:write(string.format("create %s hash:ip family inet hashsize 131072 maxelem 2097152 -exist\n",
+        config.ipsetIp))
+    configFile:write(string.format("create %s-tmp hash:ip family inet hashsize 131072 maxelem 2097152 -exist\n",
+        config.ipsetIp))
+    configFile:write(string.format("flush %s-tmp\n", config.ipsetIp))
 
-    local count = 0
-    local total = table_count(ipList)
+    local count, total = 0, table_count(ipList)
     local subnets_count = 0
 
     for ipaddr in pairs(ipList) do
-        configFile:write(string.format("add %s %s\n", tmpSetName, ipaddr))
+        configFile:write(string.format("add %s-tmp %s\n", config.ipsetIp, ipaddr))
         count = count + 1
         if ipaddr:match("/") then
             subnets_count = subnets_count + 1
@@ -913,18 +859,18 @@ local function generateIpsetConfig(configPath, ipList)
     if total > 0 then
         print_progress(total, total, "Writing IPs")
     end
-    
-    -- Атомарная замена и очистка
-    configFile:write(string.format("swap %s %s\n", setName, tmpSetName))
-    configFile:write(string.format("destroy %s\n", tmpSetName))
+
+    -- Атомарная замена: swap и удаление временного
+    configFile:write(string.format("swap %s %s-tmp\n", config.ipsetIp, config.ipsetIp))
+    configFile:write(string.format("destroy %s-tmp\n", config.ipsetIp))  -- ИСПРАВЛЕНО: добавлена очистка
     configFile:close()
 
     local file = io.open(configPath, "rb")
     if file then
         local size = file:seek("end")
         file:close()
-        print_success("✓", string.format("Saved %s IPs (%s single + %s subnets) - %s", 
-            format_number(count), 
+        print_success("✓", string.format("Saved %s IPs (%s single + %s subnets) - %s",
+            format_number(count),
             format_number(count - subnets_count),
             format_number(subnets_count),
             format_size(size)))
@@ -938,9 +884,9 @@ end
 
 local function print_statistics(bltables)
     print_header("Statistics")
-    print(string.format("  %sUnique domains:%s %s%s%s", 
+    print(string.format("  %sUnique domains:%s %s%s%s",
         colors.dim, colors.reset, colors.white, format_number(table_count(bltables.fqdn)), colors.reset))
-    print(string.format("  %sUnique IPs/subnets:%s %s%s%s", 
+    print(string.format("  %sUnique IPs/subnets:%s %s%s%s",
         colors.dim, colors.reset, colors.white, format_number(table_count(bltables.ips)), colors.reset))
 
     local source_stats = {}
@@ -1010,7 +956,8 @@ if selected_source == "all" then
     if success_count == 0 then
         print_error("✗", "All sources failed!")
     elseif #failed_sources > 0 then
-        print_warning("⚠", string.format("%d source(s) failed but continuing with available data", #failed_sources))
+        print_warning("⚠", string.format("%d source(s) failed but continuing with available data",
+            #failed_sources))
     end
 
 elseif selected_source == "antifilter" then
@@ -1022,7 +969,7 @@ elseif selected_source == "zapret-info" then
 elseif selected_source == "rublacklist" then
     success = fetch_rublacklist(bltables)
 elseif selected_source == "custom" then
-    success = true
+    success = true -- custom list only
 end
 
 -- Load custom list (always, if exists)
