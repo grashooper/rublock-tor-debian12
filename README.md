@@ -1,4 +1,5 @@
-# 🛡️ tor-gateway-debian12
+# 🛡️     rublock-tor-debian12
+
 
 <div align="center">
 
@@ -229,3 +230,4 @@ TCyZuUjX3ymFmrDPxTmeSNPMuuWRDtviFy
 MIT License. Свободное ПО для свободных людей.
 
 **Copyright (c) 2025 tor-gateway-debian12**
+
