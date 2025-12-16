@@ -1,7 +1,7 @@
 #!/usr/bin/env lua
 
 --[[
-rublock-tor Multi-Source List Updater
+privacy-gateway-tor Multi-Source List Updater
 Version: 3.3 (fixed)
 
 Features:
@@ -13,7 +13,7 @@ Features:
 
 Usage:
   lua rublupdate.lua [source]
-  
+
 Sources:
   antifilter    - Antifilter.download (recommended, fast)
   antizapret    - Antizapret API (slow, may timeout)
@@ -32,7 +32,7 @@ local config = {
 
     -- Кэширование: сохранять предыдущий успешный результат
     enableCaching = true,
-    cacheDir = "/var/cache/rublock",
+    cacheDir = "/var/cache/tor-gateway",
 
     -- Таймауты для источников (секунды)
     timeouts = {
@@ -62,12 +62,12 @@ local config = {
     convertIdn = false,
     torifyNsLookups = false,
 
-    dnsmasqConfigPath = "/etc/rublock/runblock.dnsmasq",
-    ipsetConfigPath = "/etc/rublock/runblock.ipset",
-    customListPath = "/etc/rublock/custom.list",
+    dnsmasqConfigPath = "/etc/tor-gateway/runblock.dnsmasq",
+    ipsetConfigPath = "/etc/tor-gateway/runblock.ipset",
+    customListPath = "/etc/tor-gateway/custom.list",
 
-    ipsetDns = "rublack-dns",
-    ipsetIp = "rublack-ip",
+    ipsetDns = "tor-gateway-dns",
+    ipsetIp = "tor-gateway-ip",
     torDnsAddr = "127.0.0.1#9053",
 
     -- URLs
@@ -922,7 +922,7 @@ end
 -- Main Execution
 -- ============================================================================
 
-print_header("rublock-tor Multi-Source Updater v3.3")
+print_header("tor-gateway Multi-Source Updater v3.3")
 print_info("📦", string.format("Source: %s%s%s", colors.yellow, selected_source, colors.reset))
 print_info("🔧", string.format("Mode: %s", config.failureMode == "degrade" and "Graceful degradation" or "Strict"))
 print_info("⏰", string.format("Started at %s", os.date("%H:%M:%S")))
@@ -1010,7 +1010,7 @@ if domain_count < config.blMinimumEntries and selected_source ~= "custom" then
 end
 
 print()
-print_header("Blocklists Updated Successfully")
+print_header("Lists Updated Successfully")
 print_success("✓", string.format("Source: %s%s%s", colors.yellow, selected_source, colors.reset))
 print_success("✓", string.format("Domains: %s%s%s", colors.white, format_number(domain_count), colors.reset))
 print_success("✓", string.format("IPs: %s%s%s", colors.white, format_number(ip_count), colors.reset))

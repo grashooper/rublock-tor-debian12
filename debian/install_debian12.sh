@@ -48,7 +48,7 @@ echo "    Локальный IP: $LOCAL_IP"
 echo "    Localhost: 127.0.0.1"
 echo ""
 
-if ! ask_continue "Продолжить установку rublock (Debian 12)?"; then
+if ! ask_continue "Продолжить установку privacy-gateway (Debian 12)?"; then
   echo "Отменено."
   exit 0
 fi
@@ -82,11 +82,11 @@ else
 fi
 
 log "[2/7] Подготовка директорий и скриптов"
-install -d /usr/local/lib/rublock /usr/local/bin /etc/rublock
+install -d /usr/local/lib/tor-gateway /usr/local/bin /etc/tor-gateway
 
 # Копируем lua скрипт
 if [[ -f "$(dirname "$0")/rublupdate.lua" ]]; then
-  install -m 0755 "$(dirname "$0")/rublupdate.lua" /usr/local/lib/rublock/rublupdate.lua
+  install -m 0755 "$(dirname "$0")/rublupdate.lua" /usr/local/lib/tor-gateway/rublupdate.lua
 else
   err "Не найден rublupdate.lua"
   exit 1
@@ -94,12 +94,12 @@ fi
 
 log "[3/7] Создание скрипта обновления (с IP: $LOCAL_IP)"
 
-cat > /usr/local/bin/rublock-update.sh << 'UPDATEEOF'
+cat > /usr/local/bin/tor-gateway-update.sh << 'UPDATEEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATA_DIR="/etc/rublock"
-LUA_SCRIPT="/usr/local/lib/rublock/rublupdate.lua"
+DATA_DIR="/etc/tor-gateway"
+LUA_SCRIPT="/usr/local/lib/tor-gateway/rublupdate.lua"
 
 LUA_BIN="$(command -v lua5.4 || command -v lua5.3 || command -v lua || true)"
 
@@ -116,30 +116,30 @@ fi
 install -d "$DATA_DIR"
 touch "$DATA_DIR/runblock.dnsmasq" "$DATA_DIR/runblock.ipset" 2>/dev/null || true
 
-echo "[rublock] Обновление списков"
+echo "[tor-gateway] Обновление списков"
 if ! "$LUA_BIN" "$LUA_SCRIPT"; then
-  echo "[rublock] Ошибка генерации списков"
+  echo "[tor-gateway] Ошибка генерации списков"
   exit 1
 fi
 
-echo "[rublock] Создание наборов ipset"
-ipset create rublack-dns hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
-ipset create rublack-ip hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
-ipset create rublack-ip-tmp hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
+echo "[tor-gateway] Создание наборов ipset"
+ipset create tor-gateway-dns hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
+ipset create tor-gateway-ip hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
+ipset create tor-gateway-ip-tmp hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
 
-ipset flush rublack-ip 2>/dev/null || true
-ipset flush rublack-dns 2>/dev/null || true
-ipset flush rublack-ip-tmp 2>/dev/null || true
+ipset flush tor-gateway-ip 2>/dev/null || true
+ipset flush tor-gateway-dns 2>/dev/null || true
+ipset flush tor-gateway-ip-tmp 2>/dev/null || true
 
 if [[ -s "$DATA_DIR/runblock.ipset" ]]; then
-  echo "[rublock] Загрузка IP-адресов в ipset"
+  echo "[tor-gateway] Загрузка IP-адресов в ipset"
   ipset restore -! <"$DATA_DIR/runblock.ipset" 2>/dev/null || true
 fi
 
-echo "[rublock] Применение правил iptables"
+echo "[tor-gateway] Применение правил iptables"
 for chain in PREROUTING OUTPUT; do
   for proto in tcp udp; do
-    for setname in rublack-dns rublack-ip; do
+    for setname in tor-gateway-dns tor-gateway-ip; do
       if ! iptables -t nat -C "$chain" -p "$proto" -m set --match-set "$setname" dst -j REDIRECT --to-ports 9040 2>/dev/null; then
         iptables -t nat -I "$chain" -p "$proto" -m set --match-set "$setname" dst -j REDIRECT --to-ports 9040
       fi
@@ -147,18 +147,18 @@ for chain in PREROUTING OUTPUT; do
   done
 done
 
-echo "[rublock] Перезагрузка сервисов"
+echo "[tor-gateway] Перезагрузка сервисов"
 systemctl reload tor 2>/dev/null || systemctl restart tor || true
 systemctl reload dnsmasq 2>/dev/null || systemctl restart dnsmasq || true
 
-echo "[rublock] Готово"
+echo "[tor-gateway] Готово"
 UPDATEEOF
 
-chmod +x /usr/local/bin/rublock-update.sh
+chmod +x /usr/local/bin/tor-gateway-update.sh
 
 log "[4/7] Конфигурация dnsmasq"
-cat > /etc/dnsmasq.d/rublock.conf << EOF
-# rublock configuration
+cat > /etc/dnsmasq.d/tor-gateway.conf << EOF
+# tor-gateway configuration
 # Автосгенерировано: $(date)
 # Локальный IP: $LOCAL_IP
 
@@ -175,20 +175,20 @@ server=8.8.8.8
 server=8.8.4.4
 server=1.1.1.1
 
-# rublock списки
-conf-file=/etc/rublock/runblock.dnsmasq
-ipset=/onion/rublack-dns
+# tor-gateway списки
+conf-file=/etc/tor-gateway/runblock.dnsmasq
+ipset=/onion/tor-gateway-dns
 server=/onion/127.0.0.1#9053
 EOF
 
 log "[5/7] Конфигурация Tor (IP: $LOCAL_IP)"
 
-# Удаляем старые конфиги rublock в torrc.d
-rm -f /etc/tor/torrc.d/rublock.conf /etc/tor/torrc.d/rublock.bridges 2>/dev/null || true
+# Удаляем старые конфиги tor-gateway в torrc.d
+rm -f /etc/tor/torrc.d/tor-gateway.conf /etc/tor/torrc.d/tor-gateway.bridges 2>/dev/null || true
 
 # Создаём основной конфиг Tor
 cat > /etc/tor/torrc << EOF
-# Tor configuration for rublock
+# Tor configuration for tor-gateway
 # Автосгенерировано: $(date)
 # Локальный IP: $LOCAL_IP
 
@@ -241,15 +241,15 @@ install -d -o debian-tor -g debian-tor /var/log/tor
 
 log "[6/7] Unit-файлы systemd"
 
-cat > /etc/systemd/system/rublock-update.service << 'EOF'
+cat > /etc/systemd/system/tor-gateway-update.service << 'EOF'
 [Unit]
-Description=Обновление списков rublock и применение iptables/ipset
+Description=Обновление списков tor-gateway и применение iptables/ipset
 Wants=network-online.target
 After=network-online.target tor.service dnsmasq.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/rublock-update.sh
+ExecStart=/usr/local/bin/tor-gateway-update.sh
 StandardOutput=journal
 StandardError=journal
 
@@ -257,9 +257,9 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/rublock-update.timer << 'EOF'
+cat > /etc/systemd/system/tor-gateway-update.timer << 'EOF'
 [Unit]
-Description=Периодический запуск rublock-update
+Description=Периодический запуск tor-gateway-update
 
 [Timer]
 OnCalendar=*-*-* 05:00:00
@@ -271,7 +271,7 @@ WantedBy=timers.target
 EOF
 
 systemctl daemon-reload
-systemctl enable rublock-update.timer
+systemctl enable tor-gateway-update.timer
 
 log "[7/7] Запуск сервисов"
 
@@ -289,18 +289,18 @@ systemctl restart tor
 sleep 3
 
 # Запускаем обновление списков
-if /usr/local/bin/rublock-update.sh; then
-  log "Первичный запуск rublock-update выполнен успешно"
+if /usr/local/bin/tor-gateway-update.sh; then
+  log "Первичный запуск tor-gateway-update выполнен успешно"
 else
-  warn "Первичный запуск rublock-update завершился с ошибкой. Проверьте: sudo rublock-update.sh"
+  warn "Первичный запуск tor-gateway-update завершился с ошибкой. Проверьте: sudo tor-gateway-update.sh"
 fi
 
 # Запускаем таймер
-systemctl start rublock-update.timer
+systemctl start tor-gateway-update.timer
 
 echo ""
 log "=========================================="
-log "Установка завершена!"
+log "Установка tor-gateway завершена!"
 log "=========================================="
 echo ""
 echo "Настройки:"
