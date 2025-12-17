@@ -90,7 +90,7 @@ graph TD
 # 1. Подготовка системы и клонирование
 sudo apt update && sudo apt install -y git
 git clone https://github.com/grashooper/rublock-tor-debian12.git
-cd /root/rublock-tor/debian
+cd /root/rublock-tor-debian12/debian
 
 # 2. Запуск автоматического установщика
 sudo ./install_debian12.sh
@@ -227,4 +227,5 @@ TCyZuUjX3ymFmrDPxTmeSNPMuuWRDtviFy
 MIT License. Свободное ПО для свободных людей.
 
 **Copyright (c) 2025 rublock-tor-debian12**
+
 
