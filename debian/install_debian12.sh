@@ -123,9 +123,9 @@ if ! "$LUA_BIN" "$LUA_SCRIPT"; then
 fi
 
 echo "[rublock] Создание наборов ipset"
-ipset create rublack-dns hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
-ipset create rublack-ip hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
-ipset create rublack-ip-tmp hash:ip family inet hashsize 65536 maxelem 1048576 -exist 2>/dev/null || true
+ipset create rublack-dns hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
+ipset create rublack-ip hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
+ipset create rublack-ip-tmp hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
 
 ipset flush rublack-ip 2>/dev/null || true
 ipset flush rublack-dns 2>/dev/null || true

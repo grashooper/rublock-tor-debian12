@@ -298,10 +298,15 @@ end
 -- HTTP Functions with Timeout
 -- ============================================================================
 
+local function escape_shell_arg(str)
+    return "'" .. str:gsub("'", "'\\''") .. "'"
+end
+
 local function http_fetch(url, sink, timeout)
     timeout = timeout or 90
-    local cmd = string.format("timeout %d curl -fsSL --compressed --max-time %d '%s' 2>/dev/null",
-        timeout, timeout, url)
+    local safe_url = escape_shell_arg(url)
+    local cmd = string.format("timeout %d curl -fsSL --compressed --max-time %d %s 2>/dev/null",
+        timeout, timeout, safe_url)
     local handle = io.popen(cmd, "r")
     if not handle then return false, "curl failed to start" end
 
@@ -318,10 +323,10 @@ end
 
 local function http_fetch_gunzip(url, sink, timeout)
     timeout = timeout or 120
-    -- ИСПРАВЛЕНО: Правильное экранирование кавычек
+    local safe_url = escape_shell_arg(url)
     local cmd = string.format(
-        [[timeout %d bash -c "curl -fsSL --max-time %d '%s' 2>/dev/null | gunzip -c 2>/dev/null"]],
-        timeout, timeout, url)
+        [[timeout %d bash -c "curl -fsSL --max-time %d %s 2>/dev/null | gunzip -c 2>/dev/null"]],
+        timeout, timeout, safe_url)
     local handle = io.popen(cmd, "r")
     if not handle then return false, "curl/gunzip failed" end
 
@@ -538,7 +543,7 @@ end
 local function fetch_antifilter(bltables)
     print_header("Fetching from Antifilter")
     local source_timer = {start_time = os.time()}
-    local stats = {domains = 0, ips = 0, subnets = 0, resolved = 0}
+    local stats = {domains = 0, ips = 0, subnets = 0, resolved = 0, total_time = 0}
     local timeout = config.timeouts.antifilter
 
     print_info("🌐", "Downloading domains...")
@@ -611,7 +616,9 @@ local function fetch_antifilter(bltables)
     end
 
     local elapsed = os.difftime(os.time(), source_timer.start_time)
-    print_success("✓", string.format("Completed in %.1fs", elapsed))
+    local total_entries = stats.domains + stats.ips + stats.subnets + stats.resolved
+    local rate = elapsed > 0 and math.floor(total_entries / elapsed) or 0
+    print_success("✓", string.format("Completed in %.1fs (%s entries/sec)", elapsed, format_number(rate)))
     return stats.domains > 0
 end
 
@@ -642,7 +649,7 @@ local function fetch_zapretinfo(bltables)
     print_success("✓", string.format("Downloaded %s", format_size(#data)))
 
     print_info("🔍", "Processing CSV...")
-    local totalLines, stats = 0, {domains = 0, ips = 0}
+    local totalLines, stats = 0, {domains = 0, ips = 0, skipped = 0}
     for _ in data:gmatch("[^\r\n]+") do totalLines = totalLines + 1 end
 
     local lineCount = 0
@@ -653,22 +660,35 @@ local function fetch_zapretinfo(bltables)
         end
 
         local ip_str, fqdn_str = line:match("^([^;]*);([^;]*);")
-        if fqdn_str and fqdn_str ~= "" then
-            addEntry(bltables, fqdn_str, "zapret-info")
-            stats.domains = stats.domains + 1
-        end
-        if ip_str and ip_str ~= "" then
-            addEntry(bltables, ip_str, "zapret-info")
-            stats.ips = stats.ips + 1
+        local has_ip = ip_str and ip_str ~= ""
+        local has_domain = fqdn_str and fqdn_str ~= ""
+
+        if not has_ip and not has_domain then
+            stats.skipped = stats.skipped + 1
+        else
+            if has_domain then
+                addEntry(bltables, fqdn_str, "zapret-info")
+                stats.domains = stats.domains + 1
+            end
+            if has_ip then
+                addEntry(bltables, ip_str, "zapret-info")
+                stats.ips = stats.ips + 1
+            end
         end
     end
 
     print_progress(totalLines, totalLines, "Processing")
-    print_success("✓", string.format("Domains: %s, IPs: %s",
-        format_number(stats.domains), format_number(stats.ips)))
+    local result_msg = string.format("Domains: %s, IPs: %s",
+        format_number(stats.domains), format_number(stats.ips))
+    if stats.skipped > 0 then
+        result_msg = result_msg .. string.format(", Skipped: %s", format_number(stats.skipped))
+    end
+    print_success("✓", result_msg)
 
     local elapsed = os.difftime(os.time(), source_timer.start_time)
-    print_success("✓", string.format("Completed in %.1fs", elapsed))
+    local total_entries = stats.domains + stats.ips
+    local rate = elapsed > 0 and math.floor(total_entries / elapsed) or 0
+    print_success("✓", string.format("Completed in %.1fs (%s entries/sec)", elapsed, format_number(rate)))
     return true
 end
 
@@ -712,8 +732,8 @@ local function fetch_antizapret(bltables)
 
     print_info("🌐", "Downloading IPs...")
     local ipBuf = {}
+    local ip_count = 0
     if http_fetch(config.urls.antizapret_ips, ltn12.sink.table(ipBuf), timeout) then
-        local ip_count = 0
         for line in table.concat(ipBuf):gmatch("[^\r\n]+") do
             addEntry(bltables, line, "antizapret")
             ip_count = ip_count + 1
@@ -725,7 +745,9 @@ local function fetch_antizapret(bltables)
     end
 
     local elapsed = os.difftime(os.time(), source_timer.start_time)
-    print_success("✓", string.format("Completed in %.1fs", elapsed))
+    local total_entries = domain_count + ip_count
+    local rate = elapsed > 0 and math.floor(total_entries / elapsed) or 0
+    print_success("✓", string.format("Completed in %.1fs (%s entries/sec)", elapsed, format_number(rate)))
     return true
 end
 
@@ -748,7 +770,8 @@ local function fetch_rublacklist(bltables)
     if http_fetch(config.urls.rublacklist, extractSink, timeout) then
         print_success("✓", string.format("Domains: %s", format_number(domain_count)))
         local elapsed = os.difftime(os.time(), source_timer.start_time)
-        print_success("✓", string.format("Completed in %.1fs", elapsed))
+        local rate = elapsed > 0 and math.floor(domain_count / elapsed) or 0
+        print_success("✓", string.format("Completed in %.1fs (%s entries/sec)", elapsed, format_number(rate)))
         return true
     else
         print_error("✗", "Failed (API unavailable)")
