@@ -92,6 +92,9 @@ sudo apt update && sudo apt install -y git
 git clone https://github.com/grashooper/rublock-tor-debian12.git
 cd /root/rublock-tor-debian12/debian
 
+#Установка прав на запуск
+chmod +x install_debian12.sh
+
 # 2. Запуск автоматического установщика
 sudo ./install_debian12.sh
 ```
@@ -227,5 +230,6 @@ TCyZuUjX3ymFmrDPxTmeSNPMuuWRDtviFy
 MIT License. Свободное ПО для свободных людей.
 
 **Copyright (c) 2025 rublock-tor-debian12**
+
 
 
