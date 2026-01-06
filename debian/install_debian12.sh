@@ -18,7 +18,6 @@ err()  { echo -e "${RED}[!]${NC} $*" >&2; }
 
 # Автоопределение локального IP (не localhost)
 get_local_ip() {
-  # Получаем IP основного интерфейса (исключаем docker, lo, veth)
   ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | grep -v '^172\.17\.' | grep -v '^172\.18\.' | head -1
 }
 
@@ -125,11 +124,9 @@ fi
 echo "[rublock] Создание наборов ipset"
 ipset create rublack-dns hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
 ipset create rublack-ip hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
-ipset create rublack-ip-tmp hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
 
 ipset flush rublack-ip 2>/dev/null || true
 ipset flush rublack-dns 2>/dev/null || true
-ipset flush rublack-ip-tmp 2>/dev/null || true
 
 if [[ -s "$DATA_DIR/runblock.ipset" ]]; then
   echo "[rublock] Загрузка IP-адресов в ipset"
@@ -137,18 +134,27 @@ if [[ -s "$DATA_DIR/runblock.ipset" ]]; then
 fi
 
 echo "[rublock] Применение правил iptables"
-for chain in PREROUTING OUTPUT; do
-  for proto in tcp udp; do
-    for setname in rublack-dns rublack-ip; do
-      if ! iptables -t nat -C "$chain" -p "$proto" -m set --match-set "$setname" dst -j REDIRECT --to-ports 9040 2>/dev/null; then
-        iptables -t nat -I "$chain" -p "$proto" -m set --match-set "$setname" dst -j REDIRECT --to-ports 9040
-      fi
-    done
-  done
-done
+# Проверяем и добавляем правило только ОДИН раз (объединённое)
+if ! iptables -t nat -C PREROUTING -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I PREROUTING -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040
+fi
 
-echo "[rublock] Перезагрузка сервисов"
-systemctl reload tor 2>/dev/null || systemctl restart tor || true
+if ! iptables -t nat -C PREROUTING -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I PREROUTING -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040
+fi
+
+if ! iptables -t nat -C OUTPUT -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I OUTPUT -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040
+fi
+
+if ! iptables -t nat -C OUTPUT -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I OUTPUT -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040
+fi
+
+# Сохраняем правила
+netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4
+
+echo "[rublock] Перезагрузка dnsmasq (Tor НЕ перезагружается)"
 systemctl reload dnsmasq 2>/dev/null || systemctl restart dnsmasq || true
 
 echo "[rublock] Готово"
@@ -183,10 +189,10 @@ EOF
 
 log "[5/7] Конфигурация Tor (IP: $LOCAL_IP)"
 
-# Удаляем старые конфиги rublock в torrc.d
+# Удаляем старые конфиги
 rm -f /etc/tor/torrc.d/rublock.conf /etc/tor/torrc.d/rublock.bridges 2>/dev/null || true
 
-# Создаём основной конфиг Tor
+# Создаём оптимизированный конфиг Tor
 cat > /etc/tor/torrc << EOF
 # Tor configuration for rublock
 # Автосгенерировано: $(date)
@@ -196,17 +202,17 @@ User debian-tor
 DataDirectory /var/lib/tor
 PidFile /run/tor/tor.pid
 
-# Виртуальные адреса для .onion
+# Виртуальные адреса
 VirtualAddrNetworkIPv4 10.254.0.0/16
 AutomapHostsOnResolve 1
 
-# SOCKS прокси
+# SOCKS прокси (пассивный, без изоляции)
 SocksPort 127.0.0.1:9050
 SocksPort $LOCAL_IP:9050
 
-# Transparent Proxy для rublock
-TransPort 127.0.0.1:9040 IsolateClientAddr
-TransPort $LOCAL_IP:9040 IsolateClientAddr
+# TransPort для rublock (БЕЗ избыточной изоляции)
+TransPort 127.0.0.1:9040
+TransPort $LOCAL_IP:9040
 
 # DNS через Tor
 DNSPort 127.0.0.1:9053
@@ -214,10 +220,9 @@ DNSPort $LOCAL_IP:9053
 
 # Запрет быть Exit-нодой
 ExitPolicy reject *:*
-ExitPolicy reject6 *:*
 ExitRelay 0
 
-# Исключаем страны СНГ и соседние
+# Исключаем страны СНГ
 ExcludeNodes {RU},{BY},{KG},{KZ},{UZ},{TJ},{TM},{TR},{AZ},{AM},{UA}
 ExcludeExitNodes {RU},{BY},{KG},{KZ},{UZ},{TJ},{TM},{TR},{AZ},{AM},{UA}
 StrictNodes 1
@@ -230,10 +235,19 @@ ClientPreferIPv6ORPort 1
 # Логирование
 Log notice file /var/log/tor/notices.log
 
-# Опционально: obfs4 мосты (раскомментируйте если нужны)
-# ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+# === ОПТИМИЗАЦИЯ ===
+NumEntryGuards 3
+CircuitBuildTimeout 60
+MaxCircuitDirtiness 600
+NewCircuitPeriod 30
+CircuitStreamTimeout 60
+MaxMemInQueues 512 MB
+AvoidDiskWrites 1
+
+# Мосты (раскомментируйте если нужны)
 # UseBridges 1
-# Bridge obfs4 IP:PORT FINGERPRINT cert=CERT iat-mode=0
+# ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+# Bridge obfs4 193.11.166.194:27015 2D82C2E354D531A68469ADF7F878FA6060C6BACA cert=4TLQPJrTSaDffMK7Nbao6LC7G9OW/NHkUwIdjLSS3KYf0Nv4/nQiiI8dY2TcsQx01NniOg iat-mode=0
 EOF
 
 # Создаём директорию для логов
@@ -286,7 +300,7 @@ systemctl restart dnsmasq
 systemctl restart tor
 
 # Ждём запуска Tor
-sleep 3
+sleep 5
 
 # Запускаем обновление списков
 if /usr/local/bin/rublock-update.sh; then
