@@ -1091,15 +1091,17 @@ setup_directories() {
     fi
     chmod 644 "$RUBLOCK_DNSMASQ_FILE"
     
-    # Создание улучшенного Lua скрипта для парсинга списков
-    # Используем переменную TOR_DNS_PORT для настройки порта
-    cat > "$RUBLOCK_SCRIPT" << LUAEOF
+    # Создание ПОЛНОГО Lua скрипта с прогресс-барами
+    cat > "$RUBLOCK_SCRIPT" << 'LUAEOF'
 #!/usr/bin/env lua
 
 --[[
 ================================================================================
   rublock.lua - Обновление списков заблокированных доменов для Tor
-  Version: 2.0
+  Version: 2.3 (исправлен прогресс-бар)
+  
+  Загружает списки из zapret-info и других источников,
+  парсит домены и создаёт конфигурацию для dnsmasq
 ================================================================================
 --]]
 
@@ -1110,41 +1112,64 @@ local ltn12 = require("ltn12")
 -- Конфигурация
 --------------------------------------------------------------------------------
 local CONFIG = {
+    -- Основной источник (РКН dump в gzip)
     source_url_gz = "https://raw.githubusercontent.com/zapret-info/z-i/master/dump.csv.gz",
     
+    -- Дополнительные источники
     extra_sources = {
-        "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst",
-        "https://community.antifilter.download/list/domains.lst",
-        "https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/domains_all.lst"
+        {
+            url = "https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst",
+            name = "itdoginfo/allow-domains"
+        },
+        {
+            url = "https://community.antifilter.download/list/domains.lst",
+            name = "antifilter.download"
+        },
+        {
+            url = "https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/domains_all.lst",
+            name = "Re-filter-lists"
+        }
     },
     
-    output_file = "${RUBLOCK_DNSMASQ_FILE}",
+    -- Пути к файлам (будут заменены при установке)
+    output_file = "OUTPUT_FILE_PLACEHOLDER",
     temp_file = "/tmp/rublock_domains.tmp",
     temp_gz = "/tmp/rublock_dump.csv.gz",
     temp_csv = "/tmp/rublock_dump.csv",
     
-    tor_dns = "127.0.0.1#${TOR_DNS_PORT}",
+    -- Tor DNS сервер (будет заменён при установке)
+    tor_dns = "TOR_DNS_PLACEHOLDER",
     
+    -- Исключения (домены, которые НЕ нужно блокировать)
     exclude_domains = {
+        -- Google сервисы
         ["google.com"] = true,
         ["google.ru"] = true,
         ["googleapis.com"] = true,
         ["googleusercontent.com"] = true,
         ["gstatic.com"] = true,
         ["googlevideo.com"] = true,
+        
+        -- YouTube
         ["youtube.com"] = true,
         ["youtu.be"] = true,
         ["ytimg.com"] = true,
         ["ggpht.com"] = true,
+        
+        -- Facebook/Meta
         ["facebook.com"] = true,
         ["fbcdn.net"] = true,
         ["instagram.com"] = true,
         ["whatsapp.com"] = true,
         ["whatsapp.net"] = true,
+        
+        -- Облачные сервисы
         ["cloudflare.com"] = true,
         ["cloudflare-dns.com"] = true,
         ["amazonaws.com"] = true,
         ["azure.com"] = true,
+        
+        -- Популярные сервисы
         ["apple.com"] = true,
         ["icloud.com"] = true,
         ["microsoft.com"] = true,
@@ -1155,86 +1180,155 @@ local CONFIG = {
         ["linkedin.com"] = true
     },
     
+    -- Настройки
     max_download_time = 600,
     progress_interval = 50000
 }
 
+--------------------------------------------------------------------------------
+-- ANSI цвета для терминала
+--------------------------------------------------------------------------------
+local COLORS = {
+    reset = "\27[0m",
+    bold = "\27[1m",
+    red = "\27[31m",
+    green = "\27[32m",
+    yellow = "\27[33m",
+    blue = "\27[34m",
+    cyan = "\27[36m",
+    
+    -- Комбинации
+    success = "\27[32m\27[1m",
+    error = "\27[31m\27[1m",
+    warning = "\27[33m\27[1m",
+    info = "\27[34m\27[1m",
+    progress = "\27[36m",
+    
+    -- Управление курсором
+    clear_line = "\27[2K",
+    move_start = "\r",
+}
+
+--------------------------------------------------------------------------------
+-- Логирование
+--------------------------------------------------------------------------------
 local function log(msg)
     io.stdout:write(os.date("[%Y-%m-%d %H:%M:%S] ") .. msg .. "\n")
     io.stdout:flush()
 end
 
-local function log_separator(char)
-    char = char or "="
-    log(string.rep(char, 70))
+local function log_color(color, prefix, msg)
+    io.stdout:write(color .. prefix .. COLORS.reset .. " " .. msg .. "\n")
+    io.stdout:flush()
 end
 
-local function download_with_curl(url, filepath)
-    local safe_filepath = filepath:gsub("'", "'\\\\''")
-    local safe_url = url:gsub("'", "'\\\\''")
-    
-    local cmd = string.format(
-        "curl -L -s -f --max-time %d -o '%s' '%s' 2>&1",
-        CONFIG.max_download_time,
-        safe_filepath,
-        safe_url
-    )
-    
-    local handle = io.popen(cmd)
-    if handle then
-        local output = handle:read("*a") or ""
-        local success = handle:close()
-        
-        local test_file = io.open(filepath, "r")
-        if success and test_file then
-            test_file:close()
-            return true
-        end
-    end
-    
-    cmd = string.format(
-        "wget -q -T %d -O '%s' '%s' 2>&1",
-        CONFIG.max_download_time,
-        safe_filepath,
-        safe_url
-    )
-    
-    handle = io.popen(cmd)
-    if handle then
-        local output = handle:read("*a") or ""
-        local success = handle:close()
-        
-        local test_file = io.open(filepath, "r")
-        if success and test_file then
-            test_file:close()
-            return true
-        end
-    end
-    
-    return false, "Не удалось загрузить через curl или wget"
+local function log_success(msg)
+    log_color(COLORS.success, "[✓]", msg)
 end
 
-local function download_to_memory(url)
-    local response = {}
+local function log_error(msg)
+    log_color(COLORS.error, "[✗]", msg)
+end
+
+local function log_warning(msg)
+    log_color(COLORS.warning, "[⚠]", msg)
+end
+
+local function log_info(msg)
+    log_color(COLORS.info, "[ℹ]", msg)
+end
+
+--------------------------------------------------------------------------------
+-- Прогресс-бар
+--------------------------------------------------------------------------------
+local function log_progress_bar(current, total, prefix, suffix)
+    local percent = math.floor((current / total) * 100)
+    local bar_width = 30
+    local filled = math.floor(bar_width * current / total)
+    local empty = bar_width - filled
     
-    local result, status_code = https.request{
-        url = url,
-        sink = ltn12.sink.table(response),
-        protocol = "any",
-        options = {"all"},
-        verify = "none",
-        headers = {
-            ["User-Agent"] = "Mozilla/5.0 (compatible; rublock/2.0)"
-        }
-    }
+    local bar = string.rep("█", filled) .. string.rep("░", empty)
     
-    if status_code == 200 then
-        return table.concat(response)
+    local line = string.format("    %s [%s%s%s] %3d%% %s",
+        prefix or "",
+        COLORS.green,
+        bar,
+        COLORS.reset,
+        percent,
+        suffix or ""
+    )
+    
+    io.stdout:write(COLORS.move_start .. COLORS.clear_line .. line)
+    io.stdout:flush()
+end
+
+local function log_progress_done()
+    io.stdout:write("\n")
+    io.stdout:flush()
+end
+
+--------------------------------------------------------------------------------
+-- Спиннер
+--------------------------------------------------------------------------------
+local spinner_chars = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+local spinner_idx = 1
+
+local function log_spinner(msg)
+    io.stdout:write(COLORS.move_start .. COLORS.clear_line)
+    io.stdout:write(string.format("    %s%s%s %s",
+        COLORS.cyan,
+        spinner_chars[spinner_idx],
+        COLORS.reset,
+        msg
+    ))
+    io.stdout:flush()
+    spinner_idx = (spinner_idx % #spinner_chars) + 1
+end
+
+local function log_spinner_done(msg)
+    io.stdout:write(COLORS.move_start .. COLORS.clear_line)
+    io.stdout:write(string.format("    %s✓%s %s\n",
+        COLORS.green,
+        COLORS.reset,
+        msg
+    ))
+    io.stdout:flush()
+end
+
+--------------------------------------------------------------------------------
+-- Форматирование
+--------------------------------------------------------------------------------
+local function format_size(bytes)
+    if bytes < 1024 then
+        return string.format("%d B", bytes)
+    elseif bytes < 1024 * 1024 then
+        return string.format("%.1f KB", bytes / 1024)
     else
-        return nil, "HTTP " .. tostring(status_code)
+        return string.format("%.1f MB", bytes / 1024 / 1024)
     end
 end
 
+local function format_number(num)
+    local formatted = tostring(num)
+    local k
+    while true do
+        formatted, k = string.gsub(formatted, "^(-?%d+)(%d%d%d)", '%1,%2')
+        if k == 0 then break end
+    end
+    return formatted
+end
+
+local function format_time(seconds)
+    if seconds < 60 then
+        return string.format("%d сек", seconds)
+    else
+        return string.format("%d мин %d сек", math.floor(seconds / 60), seconds % 60)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Получение размера файла
+--------------------------------------------------------------------------------
 local function get_file_size(filepath)
     local file = io.open(filepath, "rb")
     if not file then return 0 end
@@ -1247,19 +1341,180 @@ local function get_file_size(filepath)
     return size or 0
 end
 
-local function format_size(bytes)
-    if bytes < 1024 then
-        return string.format("%d B", bytes)
-    elseif bytes < 1024 * 1024 then
-        return string.format("%.1f KB", bytes / 1024)
+--------------------------------------------------------------------------------
+-- Загрузка файла через curl
+--------------------------------------------------------------------------------
+local function download_with_progress(url, filepath, name)
+    local safe_filepath = filepath:gsub("'", "'\\''")
+    local safe_url = url:gsub("'", "'\\''")
+    
+    log_info("Загрузка: " .. (name or url))
+    
+    local cmd = string.format(
+        "curl -L -s -f --max-time %d -o '%s' '%s' 2>/dev/null &",
+        CONFIG.max_download_time,
+        safe_filepath,
+        safe_url
+    )
+    
+    os.remove(filepath)
+    os.execute(cmd)
+    os.execute("sleep 0.5")
+    
+    local start_time = os.time()
+    local last_size = 0
+    local stall_count = 0
+    local max_stall = 30
+    
+    while true do
+        os.execute("sleep 0.5")
+        
+        local current_size = get_file_size(filepath)
+        local elapsed = os.time() - start_time
+        
+        if current_size > 0 then
+            local speed = ""
+            if elapsed > 0 then
+                speed = format_size(current_size / elapsed) .. "/с"
+            end
+            
+            log_spinner(string.format("Загружено: %s (%s)", format_size(current_size), speed))
+            
+            if current_size == last_size then
+                stall_count = stall_count + 1
+                if stall_count >= 4 then
+                    break
+                end
+            else
+                stall_count = 0
+            end
+            
+            last_size = current_size
+        else
+            log_spinner("Подключение...")
+        end
+        
+        if elapsed > CONFIG.max_download_time then
+            log_spinner_done("Таймаут загрузки")
+            return false, "Таймаут"
+        end
+        
+        if stall_count >= max_stall * 2 then
+            break
+        end
+    end
+    
+    os.execute("sleep 1")
+    
+    local final_size = get_file_size(filepath)
+    local total_time = os.time() - start_time
+    
+    if final_size > 0 then
+        local speed = ""
+        if total_time > 0 then
+            speed = " (" .. format_size(final_size / total_time) .. "/с)"
+        end
+        log_spinner_done(string.format("Загружено: %s за %s%s", 
+            format_size(final_size), 
+            format_time(total_time),
+            speed))
+        return true
+    end
+    
+    log_warning("curl не сработал, пробую wget...")
+    
+    cmd = string.format(
+        "wget -q -T %d -O '%s' '%s' 2>/dev/null",
+        CONFIG.max_download_time,
+        safe_filepath,
+        safe_url
+    )
+    
+    log_spinner("Загрузка через wget...")
+    
+    start_time = os.time()
+    os.execute(cmd)
+    total_time = os.time() - start_time
+    
+    final_size = get_file_size(filepath)
+    
+    if final_size > 0 then
+        log_spinner_done(string.format("Загружено: %s за %s", 
+            format_size(final_size), 
+            format_time(total_time)))
+        return true
+    end
+    
+    io.stdout:write(COLORS.move_start .. COLORS.clear_line)
+    io.stdout:flush()
+    return false, "Не удалось загрузить"
+end
+
+--------------------------------------------------------------------------------
+-- Загрузка в память с прогрессом
+--------------------------------------------------------------------------------
+local function download_to_memory_with_progress(url, name)
+    local response = {}
+    local bytes_received = 0
+    local start_time = os.time()
+    local last_update = 0
+    
+    log_info("Загрузка: " .. (name or url))
+    
+    local progress_sink = function(chunk, err)
+        if chunk then
+            bytes_received = bytes_received + #chunk
+            
+            if bytes_received - last_update > 51200 then
+                local elapsed = os.time() - start_time
+                local speed = ""
+                if elapsed > 0 then
+                    speed = " (" .. format_size(bytes_received / elapsed) .. "/с)"
+                end
+                log_spinner(string.format("Получено: %s%s", format_size(bytes_received), speed))
+                last_update = bytes_received
+            end
+            
+            table.insert(response, chunk)
+        end
+        return 1
+    end
+    
+    local result, status_code = https.request{
+        url = url,
+        sink = progress_sink,
+        protocol = "any",
+        options = {"all"},
+        verify = "none",
+        headers = {
+            ["User-Agent"] = "Mozilla/5.0 (compatible; rublock/2.3)"
+        }
+    }
+    
+    local total_time = os.time() - start_time
+    
+    if status_code == 200 then
+        local speed = ""
+        if total_time > 0 then
+            speed = " (" .. format_size(bytes_received / total_time) .. "/с)"
+        end
+        log_spinner_done(string.format("Загружено: %s%s", format_size(bytes_received), speed))
+        return table.concat(response)
     else
-        return string.format("%.1f MB", bytes / 1024 / 1024)
+        io.stdout:write(COLORS.move_start .. COLORS.clear_line .. "\n")
+        io.stdout:flush()
+        return nil, "HTTP " .. tostring(status_code)
     end
 end
 
+--------------------------------------------------------------------------------
+-- Распаковка gzip
+--------------------------------------------------------------------------------
 local function gunzip_file(gz_path, output_path)
-    local safe_gz = gz_path:gsub("'", "'\\\\''")
-    local safe_out = output_path:gsub("'", "'\\\\''")
+    local safe_gz = gz_path:gsub("'", "'\\''")
+    local safe_out = output_path:gsub("'", "'\\''")
+    
+    log_info("Распаковка архива...")
     
     local cmd = string.format("gunzip -c '%s' > '%s' 2>&1", safe_gz, safe_out)
     
@@ -1272,12 +1527,17 @@ local function gunzip_file(gz_path, output_path)
     local success = handle:close()
     
     if success then
+        local size = get_file_size(output_path)
+        log_success(string.format("Распаковано: %s", format_size(size)))
         return true
     else
         return false, result
     end
 end
 
+--------------------------------------------------------------------------------
+-- Чтение файла
+--------------------------------------------------------------------------------
 local function read_file(filepath)
     local file, err = io.open(filepath, "r")
     if not file then
@@ -1294,6 +1554,9 @@ local function read_file(filepath)
     return content
 end
 
+--------------------------------------------------------------------------------
+-- Валидация домена
+--------------------------------------------------------------------------------
 local function is_valid_domain(domain)
     if not domain or #domain < 4 or #domain > 253 then
         return false
@@ -1327,6 +1590,9 @@ local function is_valid_domain(domain)
     return true
 end
 
+--------------------------------------------------------------------------------
+-- Проверка исключений
+--------------------------------------------------------------------------------
 local function is_excluded(domain)
     if CONFIG.exclude_domains[domain] then
         return true
@@ -1347,6 +1613,9 @@ local function is_excluded(domain)
     return false
 end
 
+--------------------------------------------------------------------------------
+-- Очистка домена
+--------------------------------------------------------------------------------
 local function clean_domain(domain)
     if not domain then return nil end
     
@@ -1363,18 +1632,38 @@ local function clean_domain(domain)
     return domain
 end
 
+--------------------------------------------------------------------------------
+-- Парсинг CSV с прогресс-баром
+--------------------------------------------------------------------------------
 local function parse_csv(content, domains, seen)
     local count = 0
     local line_num = 0
-    local total_lines = select(2, content:gsub("\n", "\n")) + 1
     
-    log("    Всего строк в CSV: " .. total_lines)
+    local total_lines = 1
+    for _ in content:gmatch("\n") do
+        total_lines = total_lines + 1
+    end
+    
+    log_info(string.format("Парсинг CSV: %s строк", format_number(total_lines)))
+    
+    local last_progress_update = 0
+    local start_time = os.time()
     
     for line in content:gmatch("[^\r\n]+") do
         line_num = line_num + 1
         
-        if line_num % 10000 == 0 then
-            log(string.format("    Обработано строк: %d/%d", line_num, total_lines))
+        local progress_step = math.max(math.floor(total_lines / 100), 10000)
+        if line_num - last_progress_update >= progress_step or line_num == total_lines then
+            local elapsed = os.time() - start_time
+            local eta = ""
+            if line_num > 0 and elapsed > 0 and line_num < total_lines then
+                local remaining = math.floor((total_lines - line_num) * elapsed / line_num)
+                if remaining > 0 then
+                    eta = string.format("ETA: %s", format_time(remaining))
+                end
+            end
+            log_progress_bar(line_num, total_lines, "Обработка", eta)
+            last_progress_update = line_num
         end
         
         if line_num > 1 and not line:match("^Updated:") and not line:match("^%s*$") then
@@ -1414,13 +1703,37 @@ local function parse_csv(content, domains, seen)
         end
     end
     
+    log_progress_done()
+    
     return count
 end
 
+--------------------------------------------------------------------------------
+-- Парсинг списка
+--------------------------------------------------------------------------------
 local function parse_list(content, domains, seen)
     local count = 0
+    local line_num = 0
+    
+    local total_lines = 1
+    for _ in content:gmatch("\n") do
+        total_lines = total_lines + 1
+    end
+    
+    local last_update = 0
+    local update_interval = math.max(math.floor(total_lines / 10), 1000)
     
     for line in content:gmatch("[^\r\n]+") do
+        line_num = line_num + 1
+        
+        if line_num - last_update >= update_interval then
+            log_spinner(string.format("Обработано: %s / %s строк...",
+                format_number(line_num),
+                format_number(total_lines)
+            ))
+            last_update = line_num
+        end
+        
         if not line:match("^%s*#") and not line:match("^%s*$") then
             local domain = clean_domain(line)
             
@@ -1432,191 +1745,237 @@ local function parse_list(content, domains, seen)
         end
     end
     
+    if total_lines > update_interval then
+        io.stdout:write(COLORS.move_start .. COLORS.clear_line)
+        io.stdout:flush()
+    end
+    
     return count
 end
 
-local function main()
-    log_separator()
-    log("rublock - Обновление списков заблокированных доменов")
-    log_separator()
-    log("")
-    
-    local all_domains = {}
-    local seen = {}
-    local stats = {
-        sources_total = 0,
-        sources_ok = 0,
-        start_time = os.time()
-    }
-    
-    os.remove(CONFIG.temp_gz)
-    os.remove(CONFIG.temp_csv)
-    os.remove(CONFIG.temp_file)
-    
-    stats.sources_total = stats.sources_total + 1
-    log("[1/4] Основной источник: zapret-info (РКН dump)")
-    log("    URL: " .. CONFIG.source_url_gz)
-    log("    Загрузка (может занять несколько минут)...")
-    
-    local ok, err = download_with_curl(CONFIG.source_url_gz, CONFIG.temp_gz)
-    
-    if ok then
-        local size = get_file_size(CONFIG.temp_gz)
-        log("    Размер архива: " .. format_size(size))
-        
-        if size > 0 then
-            log("    Распаковка gzip...")
-            local gunzip_ok, gunzip_err = gunzip_file(CONFIG.temp_gz, CONFIG.temp_csv)
-            
-            if gunzip_ok then
-                local csv_size = get_file_size(CONFIG.temp_csv)
-                log("    Размер CSV: " .. format_size(csv_size))
-                
-                log("    Парсинг CSV (это может занять 1-2 минуты)...")
-                local content, read_err = read_file(CONFIG.temp_csv)
-                
-                if content then
-                    local count = parse_csv(content, all_domains, seen)
-                    stats.sources_ok = stats.sources_ok + 1
-                    log("    ✓ Успешно извлечено доменов: " .. count)
-                else
-                    log("    ✗ Ошибка чтения CSV: " .. (read_err or "unknown"))
-                end
-                
-                content = nil
-                collectgarbage("collect")
-                os.remove(CONFIG.temp_csv)
-            else
-                log("    ✗ Ошибка распаковки: " .. (gunzip_err or "unknown"))
-            end
-        else
-            log("    ✗ Загруженный файл пустой")
-        end
-        
-        os.remove(CONFIG.temp_gz)
-    else
-        log("    ✗ Ошибка загрузки: " .. (err or "unknown"))
-    end
-    
-    for i, url in ipairs(CONFIG.extra_sources) do
-        stats.sources_total = stats.sources_total + 1
-        log("")
-        log(string.format("[%d/%d] Дополнительный источник", i + 1, stats.sources_total))
-        log("    URL: " .. url)
-        log("    Загрузка...")
-        
-        local content, err = download_to_memory(url)
-        if content then
-            local count = parse_list(content, all_domains, seen)
-            stats.sources_ok = stats.sources_ok + 1
-            log("    ✓ Извлечено доменов: " .. count)
-            
-            content = nil
-            collectgarbage("collect")
-        else
-            log("    ✗ Ошибка: " .. (err or "unknown"))
-        end
-    end
-    
-    log("")
-    log_separator()
-    log("ИТОГОВАЯ СТАТИСТИКА:")
-    log("  Источников обработано: " .. stats.sources_ok .. "/" .. stats.sources_total)
-    log("  Уникальных доменов:    " .. #all_domains)
-    log("  Время загрузки:        " .. (os.time() - stats.start_time) .. " сек")
-    log_separator()
-    
-    if #all_domains == 0 then
-        log("")
-        log("КРИТИЧЕСКАЯ ОШИБКА: Список пуст!")
-        log("Проверьте подключение к интернету и доступность источников")
-        os.exit(1)
-    end
-    
-    log("")
-    log("Сортировка доменов по алфавиту...")
-    table.sort(all_domains)
-    log("✓ Сортировка завершена")
-    
-    log("")
-    log("Запись в файл: " .. CONFIG.output_file)
+--------------------------------------------------------------------------------
+-- Запись файла
+--------------------------------------------------------------------------------
+local function write_output_file(domains)
+    log_info("Запись в файл: " .. CONFIG.output_file)
     
     local file, file_err = io.open(CONFIG.temp_file, "w")
     if not file then
-        log("ОШИБКА: Не удалось создать файл: " .. (file_err or "unknown"))
-        os.exit(1)
+        return false, "Не удалось создать файл: " .. (file_err or "unknown")
     end
     
     file:write("# " .. string.rep("=", 70) .. "\n")
     file:write("# rublock domains list for dnsmasq\n")
     file:write("# \n")
     file:write("# Generated:  " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
-    file:write("# Domains:    " .. #all_domains .. "\n")
-    file:write("# Sources:    " .. stats.sources_ok .. "/" .. stats.sources_total .. "\n")
+    file:write("# Domains:    " .. format_number(#domains) .. "\n")
     file:write("# Tor DNS:    " .. CONFIG.tor_dns .. "\n")
     file:write("# \n")
     file:write("# " .. string.rep("=", 70) .. "\n")
     file:write("\n")
     
-    log("  Запись доменов...")
-    for i, domain in ipairs(all_domains) do
+    local total = #domains
+    local last_progress = 0
+    
+    for i, domain in ipairs(domains) do
         file:write("server=/" .. domain .. "/" .. CONFIG.tor_dns .. "\n")
         
-        if i % 50000 == 0 then
-            log(string.format("  Записано: %d/%d", i, #all_domains))
+        local progress_step = math.max(math.floor(total / 100), 1000)
+        if i - last_progress >= progress_step or i == total then
+            log_progress_bar(i, total, "Запись")
+            last_progress = i
         end
     end
     
     file:close()
-    log("✓ Запись завершена")
     
-    log("")
-    log("Применение изменений...")
-    os.execute("mv '" .. CONFIG.temp_file:gsub("'", "'\\\\''") .. "' '" .. CONFIG.output_file:gsub("'", "'\\\\''") .. "'")
-    os.execute("chmod 644 '" .. CONFIG.output_file:gsub("'", "'\\\\''") .. "'")
-    log("✓ Файл сохранён: " .. CONFIG.output_file)
+    log_progress_done()
     
-    log("")
-    log("Перезагрузка dnsmasq...")
+    os.execute("mv '" .. CONFIG.temp_file:gsub("'", "'\\''") .. "' '" .. CONFIG.output_file:gsub("'", "'\\''") .. "'")
+    os.execute("chmod 644 '" .. CONFIG.output_file:gsub("'", "'\\''") .. "'")
+    
+    log_success("Файл сохранён")
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- Главная функция
+--------------------------------------------------------------------------------
+local function main()
+    local total_start = os.time()
+    
+    io.stdout:write("\n")
+    io.stdout:write(COLORS.cyan .. COLORS.bold)
+    io.stdout:write("╔══════════════════════════════════════════════════════════════════════╗\n")
+    io.stdout:write("║                                                                      ║\n")
+    io.stdout:write("║              rublock - Обновление списков блокировок                 ║\n")
+    io.stdout:write("║                          Version 2.3                                 ║\n")
+    io.stdout:write("║                                                                      ║\n")
+    io.stdout:write("╚══════════════════════════════════════════════════════════════════════╝\n")
+    io.stdout:write(COLORS.reset .. "\n")
+    
+    local all_domains = {}
+    local seen = {}
+    local stats = {
+        sources_total = 0,
+        sources_ok = 0
+    }
+    
+    os.remove(CONFIG.temp_gz)
+    os.remove(CONFIG.temp_csv)
+    os.remove(CONFIG.temp_file)
+    
+    -- [1] Основной источник
+    stats.sources_total = stats.sources_total + 1
+    
+    io.stdout:write(COLORS.bold .. "\n[1/4] " .. COLORS.reset)
+    io.stdout:write("Основной источник: " .. COLORS.cyan .. "zapret-info (РКН dump)" .. COLORS.reset .. "\n")
+    
+    local ok, err = download_with_progress(
+        CONFIG.source_url_gz, 
+        CONFIG.temp_gz, 
+        "dump.csv.gz"
+    )
+    
+    if ok then
+        local size = get_file_size(CONFIG.temp_gz)
+        
+        if size > 0 then
+            local gunzip_ok, gunzip_err = gunzip_file(CONFIG.temp_gz, CONFIG.temp_csv)
+            
+            if gunzip_ok then
+                local content, read_err = read_file(CONFIG.temp_csv)
+                
+                if content then
+                    local count = parse_csv(content, all_domains, seen)
+                    stats.sources_ok = stats.sources_ok + 1
+                    log_success(string.format("Извлечено доменов: %s", format_number(count)))
+                else
+                    log_error("Ошибка чтения CSV: " .. (read_err or "unknown"))
+                end
+                
+                content = nil
+                collectgarbage("collect")
+                os.remove(CONFIG.temp_csv)
+            else
+                log_error("Ошибка распаковки: " .. (gunzip_err or "unknown"))
+            end
+        else
+            log_error("Загруженный файл пустой")
+        end
+        
+        os.remove(CONFIG.temp_gz)
+    else
+        log_error("Ошибка загрузки: " .. (err or "unknown"))
+    end
+    
+    -- [2+] Дополнительные источники
+    for i, source in ipairs(CONFIG.extra_sources) do
+        stats.sources_total = stats.sources_total + 1
+        
+        io.stdout:write(COLORS.bold .. string.format("\n[%d/%d] ", i + 1, #CONFIG.extra_sources + 1) .. COLORS.reset)
+        io.stdout:write("Дополнительный: " .. COLORS.cyan .. source.name .. COLORS.reset .. "\n")
+        
+        local content, err = download_to_memory_with_progress(source.url, source.name)
+        
+        if content then
+            local count = parse_list(content, all_domains, seen)
+            stats.sources_ok = stats.sources_ok + 1
+            log_spinner_done(string.format("Извлечено доменов: %s", format_number(count)))
+            
+            content = nil
+            collectgarbage("collect")
+        else
+            log_error("Ошибка: " .. (err or "unknown"))
+        end
+    end
+    
+    -- Статистика
+    io.stdout:write("\n")
+    io.stdout:write(COLORS.cyan .. "────────────────────────────────────────────────────────────────────────\n" .. COLORS.reset)
+    log_info(string.format("Источников: %d/%d успешно", stats.sources_ok, stats.sources_total))
+    log_info(string.format("Уникальных доменов: %s", format_number(#all_domains)))
+    io.stdout:write(COLORS.cyan .. "────────────────────────────────────────────────────────────────────────\n" .. COLORS.reset)
+    
+    if #all_domains == 0 then
+        io.stdout:write("\n")
+        log_error("КРИТИЧЕСКАЯ ОШИБКА: Список пуст!")
+        log_error("Проверьте подключение к интернету")
+        os.exit(1)
+    end
+    
+    -- Сортировка
+    io.stdout:write("\n")
+    log_info("Сортировка доменов по алфавиту...")
+    
+    local sort_start = os.time()
+    table.sort(all_domains)
+    local sort_time = os.time() - sort_start
+    
+    log_success(string.format("Сортировка завершена за %s", format_time(sort_time)))
+    
+    -- Запись
+    io.stdout:write("\n")
+    local write_ok, write_err = write_output_file(all_domains)
+    
+    if not write_ok then
+        log_error("Ошибка записи: " .. (write_err or "unknown"))
+        os.exit(1)
+    end
+    
+    -- Перезагрузка dnsmasq
+    io.stdout:write("\n")
+    log_info("Перезагрузка dnsmasq...")
     
     local reload_result = os.execute("systemctl reload dnsmasq 2>/dev/null")
     if reload_result ~= 0 and reload_result ~= true then
-        log("  reload не сработал, пробую restart...")
+        log_warning("reload не сработал, пробую restart...")
         os.execute("systemctl restart dnsmasq 2>/dev/null")
     end
+    log_success("dnsmasq обновлён")
     
-    log("✓ dnsmasq обновлён")
+    -- Финал
+    local total_time = os.time() - total_start
     
-    local total_time = os.time() - stats.start_time
+    io.stdout:write("\n")
+    io.stdout:write(COLORS.green .. COLORS.bold)
+    io.stdout:write("╔══════════════════════════════════════════════════════════════════════╗\n")
+    io.stdout:write("║                                                                      ║\n")
+    io.stdout:write("║           ✓ ✓ ✓   ОБНОВЛЕНИЕ ЗАВЕРШЕНО УСПЕШНО   ✓ ✓ ✓              ║\n")
+    io.stdout:write("║                                                                      ║\n")
+    io.stdout:write("╚══════════════════════════════════════════════════════════════════════╝\n")
+    io.stdout:write(COLORS.reset .. "\n")
     
-    log("")
-    log_separator("=")
-    log("✓✓✓ ОБНОВЛЕНИЕ ЗАВЕРШЕНО УСПЕШНО ✓✓✓")
-    log_separator("=")
-    log("")
-    log("  Всего доменов:  " .. #all_domains)
-    log("  Общее время:    " .. total_time .. " сек")
-    log("  Файл:           " .. CONFIG.output_file)
-    log("")
-    log_separator("=")
-    log("")
+    io.stdout:write(string.format("  %sДоменов:%s       %s\n", 
+        COLORS.bold, COLORS.reset, format_number(#all_domains)))
+    io.stdout:write(string.format("  %sВремя:%s         %s\n", 
+        COLORS.bold, COLORS.reset, format_time(total_time)))
+    io.stdout:write(string.format("  %sФайл:%s          %s\n", 
+        COLORS.bold, COLORS.reset, CONFIG.output_file))
+    io.stdout:write("\n")
 end
 
+--------------------------------------------------------------------------------
+-- Запуск
+--------------------------------------------------------------------------------
 local status, err = pcall(main)
 
 if not status then
-    log("")
-    log_separator("!")
-    log("ФАТАЛЬНАЯ ОШИБКА:")
-    log(tostring(err))
-    log_separator("!")
-    log("")
+    io.stdout:write("\n")
+    io.stdout:write(COLORS.error .. "╔══════════════════════════════════════════════════════════════════════╗\n")
+    io.stdout:write("║                      ФАТАЛЬНАЯ ОШИБКА                                ║\n")
+    io.stdout:write("╚══════════════════════════════════════════════════════════════════════╝\n" .. COLORS.reset)
+    io.stdout:write("\n" .. tostring(err) .. "\n\n")
     os.exit(1)
 end
 LUAEOF
 
+    # Замена плейсхолдеров на реальные значения
+    sed -i "s|OUTPUT_FILE_PLACEHOLDER|${RUBLOCK_DNSMASQ_FILE}|g" "$RUBLOCK_SCRIPT"
+    sed -i "s|TOR_DNS_PLACEHOLDER|127.0.0.1#${TOR_DNS_PORT}|g" "$RUBLOCK_SCRIPT"
+    
     chmod +x "$RUBLOCK_SCRIPT"
-    log_success "Lua скрипт установлен (поддержка ~970K доменов)"
+    log_success "Lua скрипт установлен (версия с прогресс-барами)"
 }
 
 #===============================================================================
@@ -1626,35 +1985,375 @@ create_update_script() {
     print_header "Шаг 6/8: Создание скрипта обновления"
     
     cat > "$RUBLOCK_UPDATE_SCRIPT" << UPDATEEOF
-#!/bin/bash
-#
-# rublock-update.sh - Скрипт обновления списков блокировок
-#
+#!/usr/bin/env bash
 
-LOGFILE="$LOG_FILE"
-RUBLOCK_SCRIPT="$RUBLOCK_SCRIPT"
+#===============================================================================
+# rublock-update.sh - Обновление списков блокировок с ipset + dnsmasq
+# Version: 2.3 (исправлена область видимости переменных)
+#===============================================================================
 
-exec >> "\$LOGFILE" 2>&1
+# Строгий режим, но с обработкой ошибок
+set -euo pipefail
 
-echo "==================================================="
-echo "Запуск обновления: \$(date)"
-echo "==================================================="
+# Ловушка для отладки ошибок
+trap 'echo "ОШИБКА на строке $LINENO: код $?" >&2' ERR
 
-if [ -x "\$RUBLOCK_SCRIPT" ]; then
-    "\$RUBLOCK_SCRIPT"
-    EXIT_CODE=\$?
-    
-    if [ \$EXIT_CODE -eq 0 ]; then
-        echo "[OK] Обновление успешно завершено"
+DATA_DIR="/etc/rublock"
+LUA_SCRIPT="/usr/local/bin/rublock.lua"
+LOG_FILE="/var/log/rublock-update.log"
+
+# Глобальная переменная для Lua
+LUA_BIN=""
+
+# Цвета
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+#===============================================================================
+# Функции логирования
+#===============================================================================
+log_info() { 
+    echo -e "${BLUE}${BOLD}[ℹ]${NC} $*" | tee -a "$LOG_FILE"
+}
+
+log_success() { 
+    echo -e "${GREEN}${BOLD}[✓]${NC} $*" | tee -a "$LOG_FILE"
+}
+
+log_warning() { 
+    echo -e "${YELLOW}${BOLD}[⚠]${NC} $*" | tee -a "$LOG_FILE"
+}
+
+log_error() { 
+    echo -e "${RED}${BOLD}[✗]${NC} $*" | tee -a "$LOG_FILE"
+}
+
+print_header() {
+    local text="$1"
+    local width=70
+    echo "" | tee -a "$LOG_FILE"
+    echo -e "${CYAN}${BOLD}┌$(printf '─%.0s' $(seq 1 $width))┐${NC}" | tee -a "$LOG_FILE"
+    printf "${CYAN}${BOLD}│${NC} ${BOLD}%-$((width-1))s${NC}${CYAN}${BOLD}│${NC}\n" "$text" | tee -a "$LOG_FILE"
+    echo -e "${CYAN}${BOLD}└$(printf '─%.0s' $(seq 1 $width))┘${NC}" | tee -a "$LOG_FILE"
+    echo "" | tee -a "$LOG_FILE"
+}
+
+print_banner() {
+    echo -e "${CYAN}${BOLD}"
+    echo "╔══════════════════════════════════════════════════════════════════════╗"
+    echo "║                                                                      ║"
+    echo "║                    rublock-update v2.3                               ║"
+    echo "║              Обновление списков блокировок                           ║"
+    echo "║                                                                      ║"
+    echo "╚══════════════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+format_number() {
+    local num="${1:-0}"
+    echo "$num" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta'
+}
+
+format_time() {
+    local seconds="${1:-0}"
+    if [[ $seconds -lt 60 ]]; then
+        echo "${seconds} сек"
     else
-        echo "[ERROR] Ошибка обновления (код: \$EXIT_CODE)"
+        echo "$((seconds / 60)) мин $((seconds % 60)) сек"
     fi
-else
-    echo "[ERROR] Скрипт \$RUBLOCK_SCRIPT не найден или не исполняем"
-    exit 1
-fi
+}
 
-echo ""
+#===============================================================================
+# Проверка окружения
+#===============================================================================
+check_environment() {
+    print_header "Проверка окружения"
+    
+    # Проверка прав root
+    if [[ $EUID -ne 0 ]]; then
+        log_error "Требуются права root"
+        exit 1
+    fi
+    log_success "Права root: OK"
+
+    # Проверка Lua и установка глобальной переменной
+    if command -v lua5.4 &>/dev/null; then
+        LUA_BIN="$(command -v lua5.4)"
+    elif command -v lua5.3 &>/dev/null; then
+        LUA_BIN="$(command -v lua5.3)"
+    elif command -v lua &>/dev/null; then
+        LUA_BIN="$(command -v lua)"
+    else
+        log_error "Lua не найден. Установите: apt install lua5.4"
+        exit 1
+    fi
+    
+    log_success "Lua: $LUA_BIN"
+    
+    # Проверка Lua скрипта
+    if [[ ! -f "$LUA_SCRIPT" ]]; then
+        log_error "Lua скрипт не найден: $LUA_SCRIPT"
+        exit 1
+    fi
+    
+    if [[ ! -x "$LUA_SCRIPT" ]]; then
+        chmod +x "$LUA_SCRIPT" || {
+            log_error "Не удалось установить права на $LUA_SCRIPT"
+            exit 1
+        }
+        log_warning "Права на Lua скрипт исправлены"
+    fi
+    log_success "Lua скрипт: OK"
+    
+    # Проверка сервисов
+    if systemctl is-active --quiet tor 2>/dev/null; then
+        log_success "Tor: активен"
+    else
+        log_warning "Tor: не активен"
+    fi
+    
+    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+        log_success "dnsmasq: активен"
+    else
+        log_warning "dnsmasq: не активен"
+    fi
+    
+    # Создание директорий
+    mkdir -p "$DATA_DIR" || {
+        log_error "Не удалось создать $DATA_DIR"
+        exit 1
+    }
+    
+    touch "$DATA_DIR/rublock.dnsmasq" "$DATA_DIR/rublock.ipset" 2>/dev/null || true
+}
+
+#===============================================================================
+# Шаг 1: Обновление списков через Lua
+#===============================================================================
+update_blocklists() {
+    print_header "Шаг 1/4: Обновление списков доменов"
+    
+    log_info "Запуск Lua скрипта для загрузки и обработки списков..."
+    echo ""
+    
+    # Засекаем время
+    local start_time=$(date +%s)
+    
+    # Запускаем Lua скрипт (он сам показывает прогресс)
+    # Временно отключаем set -e для этой команды
+    set +e
+    "$LUA_BIN" "$LUA_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+    local lua_exit_code=${PIPESTATUS[0]}
+    set -e
+    
+    if [[ $lua_exit_code -ne 0 ]]; then
+        echo ""
+        log_error "Ошибка выполнения Lua скрипта (код: $lua_exit_code)"
+        return 1
+    fi
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    echo ""
+    log_success "Списки обновлены за $(format_time $duration)"
+    
+    # Статистика доменов
+    if [[ -f "$DATA_DIR/rublock.dnsmasq" ]]; then
+        local domain_count=$(grep -c "^server=/" "$DATA_DIR/rublock.dnsmasq" 2>/dev/null || echo 0)
+        log_info "Всего доменов в списке: $(format_number $domain_count)"
+    fi
+}
+
+#===============================================================================
+# Шаг 2: Загрузка ipset
+#===============================================================================
+load_ipset() {
+    print_header "Шаг 2/4: Проверка ipset"
+    
+    # Проверяем наличие ipset файла
+    if [[ ! -f "$DATA_DIR/rublock.ipset" ]] || [[ ! -s "$DATA_DIR/rublock.ipset" ]]; then
+        log_info "Файл ipset не найден или пуст"
+        log_info "Пропускаю (используется только DNS режим)"
+        echo "0" > /tmp/rublock-ip-count || true
+        return 0
+    fi
+    
+    log_info "Загрузка ipset..."
+    
+    # Очистка старых (игнорируем ошибки)
+    ipset destroy rublock-ip 2>/dev/null || true
+    ipset destroy rublock-ip-tmp 2>/dev/null || true
+    ipset destroy rublock-dns 2>/dev/null || true
+    
+    # Пробуем загрузить ipset
+    if ipset restore < "$DATA_DIR/rublock.ipset" 2>/dev/null; then
+        log_success "ipset загружен"
+    else
+        log_warning "Ошибка загрузки ipset"
+        echo "0" > /tmp/rublock-ip-count || true
+        return 0
+    fi
+    
+    # Создаём rublock-dns если не существует
+    ipset create rublock-dns hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
+    
+    # Подсчёт IP
+    local ip_count=$(ipset list rublock-ip 2>/dev/null | grep -c "^[0-9]" || echo 0)
+    echo "$ip_count" > /tmp/rublock-ip-count || true
+    
+    if [[ $ip_count -gt 0 ]]; then
+        log_success "Загружено IP/подсетей: $(format_number $ip_count)"
+    else
+        log_info "IP адреса не загружены (используется только DNS)"
+    fi
+}
+
+#===============================================================================
+# Шаг 3: Применение iptables правил
+#===============================================================================
+apply_iptables() {
+    print_header "Шаг 3/4: Проверка iptables"
+    
+    # Проверяем есть ли ipset
+    if ! ipset list rublock-ip >/dev/null 2>&1; then
+        log_info "ipset rublock-ip не найден"
+        log_info "Пропускаю iptables (используется только DNS режим)"
+        return 0
+    fi
+    
+    log_info "Проверка правил iptables..."
+    
+    local rules_added=0
+    
+    # PREROUTING (игнорируем ошибки проверки)
+    if ! iptables -t nat -C PREROUTING -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+        iptables -t nat -I PREROUTING -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040 || true
+        ((rules_added++)) || true
+    fi
+    
+    if ! iptables -t nat -C PREROUTING -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+        iptables -t nat -I PREROUTING -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040 || true
+        ((rules_added++)) || true
+    fi
+    
+    # OUTPUT
+    if ! iptables -t nat -C OUTPUT -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+        iptables -t nat -I OUTPUT -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040 || true
+        ((rules_added++)) || true
+    fi
+    
+    if ! iptables -t nat -C OUTPUT -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+        iptables -t nat -I OUTPUT -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040 || true
+        ((rules_added++)) || true
+    fi
+    
+    if [[ $rules_added -eq 0 ]]; then
+        log_success "Все правила уже применены"
+    else
+        log_success "Добавлено правил: $rules_added"
+        
+        # Сохранение
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save 2>/dev/null || true
+        else
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        fi
+    fi
+    
+    local rules_count=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c rublock || echo 0)
+    log_info "Активных правил: $rules_count"
+}
+
+#===============================================================================
+# Шаг 4: Перезагрузка сервисов
+#===============================================================================
+reload_services() {
+    print_header "Шаг 4/4: Перезагрузка сервисов"
+    
+    log_info "Tor: перезагрузка не требуется"
+    
+    log_info "Перезагрузка dnsmasq..."
+    if systemctl reload dnsmasq 2>/dev/null; then
+        log_success "dnsmasq перезагружен"
+    elif systemctl restart dnsmasq 2>/dev/null; then
+        log_success "dnsmasq перезапущен"
+    else
+        log_error "Не удалось перезагрузить dnsmasq"
+        return 1
+    fi
+}
+
+#===============================================================================
+# Финальная статистика
+#===============================================================================
+print_summary() {
+    local domain_count=$(grep -c "^server=/" "$DATA_DIR/rublock.dnsmasq" 2>/dev/null || echo 0)
+    local ip_count=$(cat /tmp/rublock-ip-count 2>/dev/null || echo 0)
+    local rules_count=$(iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c rublock || echo 0)
+    
+    echo ""
+    echo -e "${GREEN}${BOLD}"
+    echo "╔══════════════════════════════════════════════════════════════════════╗"
+    echo "║                                                                      ║"
+    echo "║              ✓ ✓ ✓   ОБНОВЛЕНИЕ ЗАВЕРШЕНО   ✓ ✓ ✓                   ║"
+    echo "║                                                                      ║"
+    echo "╚══════════════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    echo -e "  ${BOLD}Доменов:${NC}        $(printf '%12s' "$(format_number $domain_count)")"
+    echo -e "  ${BOLD}IP/Подсетей:${NC}    $(printf '%12s' "$(format_number $ip_count)")"
+    echo -e "  ${BOLD}iptables:${NC}       $(printf '%12s' "$(format_number $rules_count)") правил"
+    echo ""
+    
+    # Очистка
+    rm -f /tmp/rublock-ip-count /tmp/ipset-errors.log 2>/dev/null || true
+}
+
+#===============================================================================
+# Главная функция
+#===============================================================================
+main() {
+    local start_time=$(date +%s)
+    
+    # Инициализация лога (создаём директорию если нужно)
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    
+    {
+        echo ""
+        echo "=========================================="
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Запуск rublock-update"
+        echo "=========================================="
+    } > "$LOG_FILE"
+    
+    print_banner
+    
+    check_environment || exit 1
+    update_blocklists || exit 1
+    load_ipset || true
+    apply_iptables || true
+    reload_services || exit 1
+    print_summary
+    
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    
+    log_info "Общее время: $(format_time $duration)"
+    echo ""
+}
+
+#===============================================================================
+# Запуск
+#===============================================================================
+main "$@"
+
 UPDATEEOF
 
     chmod +x "$RUBLOCK_UPDATE_SCRIPT"
