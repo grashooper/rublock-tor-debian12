@@ -153,9 +153,9 @@ fi
 
 log_info "Подготовка ipset наборов..."
 # Удаляем старые наборы для чистой загрузки
-ipset destroy rublack-ip 2>/dev/null || true
-ipset destroy rublack-ip-tmp 2>/dev/null || true
-ipset destroy rublack-dns 2>/dev/null || true
+ipset destroy rublock-ip 2>/dev/null || true
+ipset destroy rublock-ip-tmp 2>/dev/null || true
+ipset destroy rublock-dns 2>/dev/null || true
 
 if [[ -s "$DATA_DIR/runblock.ipset" ]]; then
   log_info "Загрузка IP-адресов через ipset restore..."
@@ -172,11 +172,11 @@ else
   exit 1
 fi
 
-# Создаём rublack-dns если не существует
-ipset create rublack-dns hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
+# Создаём rublock-dns если не существует
+ipset create rublock-dns hash:ip family inet hashsize 131072 maxelem 2097152 -exist 2>/dev/null || true
 
 # Подсчитываем загруженные IP
-IP_COUNT=$(ipset list rublack-ip 2>/dev/null | grep -c "^[0-9]" || echo 0)
+IP_COUNT=$(ipset list rublock-ip 2>/dev/null | grep -c "^[0-9]" || echo 0)
 
 # Форматируем число с разделителями тысяч
 if [[ $IP_COUNT -gt 0 ]]; then
@@ -190,27 +190,27 @@ log_info "Применение правил iptables..."
 
 # Применяем правила ТОЛЬКО для TCP (покрывает HTTPS, HTTP, большинство сайтов)
 # PREROUTING - для трафика из локальной сети
-if ! iptables -t nat -C PREROUTING -p tcp -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
-  iptables -t nat -I PREROUTING -p tcp -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040
+if ! iptables -t nat -C PREROUTING -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I PREROUTING -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040
 fi
 
-if ! iptables -t nat -C PREROUTING -p tcp -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
-  iptables -t nat -I PREROUTING -p tcp -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040
+if ! iptables -t nat -C PREROUTING -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I PREROUTING -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040
 fi
 
 # OUTPUT - для трафика с самого сервера
-if ! iptables -t nat -C OUTPUT -p tcp -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
-  iptables -t nat -I OUTPUT -p tcp -m set --match-set rublack-dns dst -j REDIRECT --to-ports 9040
+if ! iptables -t nat -C OUTPUT -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I OUTPUT -p tcp -m set --match-set rublock-dns dst -j REDIRECT --to-ports 9040
 fi
 
-if ! iptables -t nat -C OUTPUT -p tcp -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
-  iptables -t nat -I OUTPUT -p tcp -m set --match-set rublack-ip dst -j REDIRECT --to-ports 9040
+if ! iptables -t nat -C OUTPUT -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040 2>/dev/null; then
+  iptables -t nat -I OUTPUT -p tcp -m set --match-set rublock-ip dst -j REDIRECT --to-ports 9040
 fi
 
 # Сохраняем правила
 netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
 
-RULES_COUNT=$(iptables -t nat -L -n 2>/dev/null | grep -c "rublack" || echo 0)
+RULES_COUNT=$(iptables -t nat -L -n 2>/dev/null | grep -c "rublock" || echo 0)
 log_success "Активных правил iptables: $RULES_COUNT"
 
 log_info "Перезагрузка dnsmasq..."
@@ -265,10 +265,10 @@ server=1.1.1.1
 cache-size=10000
 
 # rublock списки
-conf-file=/etc/rublock/runblock.dnsmasq
+conf-file=/etc/rublock/rublock.dnsmasq
 
 # .onion домены через Tor DNS
-ipset=/onion/rublack-dns
+ipset=/onion/rublock-dns
 server=/onion/127.0.0.1#9053
 EOF
 
@@ -462,10 +462,10 @@ echo "  3. Просмотр логов Tor:"
 echo -e "     ${CYAN}sudo journalctl -u tor -f${NC}"
 echo ""
 echo "  4. Статус ipset:"
-echo -e "     ${CYAN}sudo ipset list rublack-ip | head${NC}"
+echo -e "     ${CYAN}sudo ipset list rublock-ip | head${NC}"
 echo ""
 echo "  5. Правила iptables:"
-echo -e "     ${CYAN}sudo iptables -t nat -L -n -v | grep rublack${NC}"
+echo -e "     ${CYAN}sudo iptables -t nat -L -n -v | grep rublock${NC}"
 echo ""
 echo "═══════════════════════════════════════════════════════════════════"
 echo ""
